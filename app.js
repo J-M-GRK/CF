@@ -50,6 +50,9 @@
         if (state.charSettings[name].avatar && !state.charSettings[name]._manual) {
           delete state.charSettings[name].avatar;
         }
+        if (state.charSettings[name].avatar && state.charSettings[name].avatar.startsWith('data:')) {
+          delete state.charSettings[name].avatar;
+        }
       }
     } catch(e) { state.charSettings = {}; }
     
@@ -853,11 +856,8 @@
       const avatarInput = item.querySelector('.char-avatar-input');
       const resetBtn = item.querySelector('.char-reset-btn');
 
-      const updateSettings = async () => {
+      const updateSettings = () => {
         let avatarVal = avatarInput.value.trim();
-        if (avatarVal && avatarVal.startsWith('http')) {
-          avatarVal = await cropImageToSquare(avatarVal);
-        }
         state.charSettings[name] = {
           color: colorPicker.value,
           avatar: avatarVal,
@@ -1096,75 +1096,6 @@
     renderPreview();
   }
 
-  // --- IMAGE 1:1 SQUARE CROPPING ENGINE ---
-  const croppedImageCache = new Map();
-
-  function cropImageToSquare(url) {
-    if (!url || typeof url !== 'string' || !url.startsWith('http')) return Promise.resolve(url);
-    if (croppedImageCache.has(url)) return Promise.resolve(croppedImageCache.get(url));
-
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-
-      const timer = setTimeout(() => {
-        croppedImageCache.set(url, url);
-        resolve(url);
-      }, 4000);
-
-      img.onload = () => {
-        clearTimeout(timer);
-        try {
-          const w = img.naturalWidth || img.width;
-          const h = img.naturalHeight || img.height;
-          
-          if (!w || !h || w === h) {
-            // Already 1:1 square
-            croppedImageCache.set(url, url);
-            return resolve(url);
-          }
-
-          // Not 1:1, crop based on smaller side
-          const minSide = Math.min(w, h);
-          const targetSize = Math.min(minSide, 300);
-
-          const canvas = document.createElement('canvas');
-          canvas.width = targetSize;
-          canvas.height = targetSize;
-          const ctx = canvas.getContext('2d');
-
-          let sx = 0, sy = 0;
-          if (w > h) {
-            // Horizontal image: center horizontally
-            sx = (w - h) / 2;
-            sy = 0;
-          } else {
-            // Vertical image (e.g. character standing): crop from top so head/face is preserved
-            sx = 0;
-            sy = 0;
-          }
-
-          ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, targetSize, targetSize);
-          const croppedDataUrl = canvas.toDataURL('image/png');
-          croppedImageCache.set(url, croppedDataUrl);
-          resolve(croppedDataUrl);
-        } catch (err) {
-          // If canvas export fails (e.g. CORS), fallback to original URL
-          croppedImageCache.set(url, url);
-          resolve(url);
-        }
-      };
-
-      img.onerror = () => {
-        clearTimeout(timer);
-        croppedImageCache.set(url, url);
-        resolve(url);
-      };
-
-      img.src = url;
-    });
-  }
-
   // --- ROOM URL & FIRESTORE API LOADER ---
   function extractRoomId(input) {
     if (!input) return null;
@@ -1311,27 +1242,6 @@
 
     logs.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
-    // Detect image dimensions and crop non-1:1 images based on smaller side to 1:1
-    const uniqueIcons = Array.from(new Set(logs.map(l => l.iconUrl).filter(Boolean)));
-    if (uniqueIcons.length > 0) {
-      showToast('프로필 이미지 1:1 비율 최적화 중...');
-      const cropMap = new Map();
-      await Promise.all(uniqueIcons.map(async (u) => {
-        const cropped = await cropImageToSquare(u);
-        cropMap.set(u, cropped);
-      }));
-      logs.forEach(l => {
-        if (l.iconUrl && cropMap.has(l.iconUrl)) {
-          l.iconUrl = cropMap.get(l.iconUrl);
-        }
-      });
-      for (const charName in charactersMap) {
-        if (charactersMap[charName].iconUrl && cropMap.has(charactersMap[charName].iconUrl)) {
-          charactersMap[charName].iconUrl = cropMap.get(charactersMap[charName].iconUrl);
-        }
-      }
-    }
-
     return { logs, roomTitle, charactersMap };
   }
 
@@ -1457,22 +1367,6 @@
             isFailure: /(실패|failure|펌블|fumble)[\s!?.]*$/i.test(fullText),
             hasDice: /(\d+[dD]\d+|\[\d+(?:,\s*\d+)*\]|→\s*\d+)/.test(text)
           };
-        });
-      }
-
-      // Detect image dimensions and crop non-1:1 images based on smaller side to 1:1
-      const uniqueIcons = Array.from(new Set(logs.map(l => l.iconUrl).filter(Boolean)));
-      if (uniqueIcons.length > 0) {
-        updateStatus(`이미지 1:1 크기 변환 중 (${uniqueIcons.length}개)...`, 'editing');
-        const cropMap = new Map();
-        await Promise.all(uniqueIcons.map(async (u) => {
-          const cropped = await cropImageToSquare(u);
-          cropMap.set(u, cropped);
-        }));
-        logs.forEach(l => {
-          if (l.iconUrl && cropMap.has(l.iconUrl)) {
-            l.iconUrl = cropMap.get(l.iconUrl);
-          }
         });
       }
 
@@ -2356,8 +2250,8 @@
         styleAttr = `style="--tab-color: ${color};"`;
       }
       
-      let res = `<div class="log-group ${groupClass}" data-tab-idx="${getTabIdx(tab)}" ${styleAttr}>`;
-      if (isCustom) res += `<div class="tab-badge">${escapeHtml(tab)}</div>`;
+      const res = [`<div class="log-group ${groupClass}" data-tab-idx="${getTabIdx(tab)}" ${styleAttr}>`];
+      if (isCustom) res.push(`<div class="tab-badge">${escapeHtml(tab)}</div>`);
       let prevName = null;
       let prevAvatar = null;
       
@@ -2386,7 +2280,7 @@
 
         // Merge only if both speaker name AND avatar image are identical
         let isMerged = !isNarrator && (log.name === prevName && avatarUrl === prevAvatar);
-        if (prevName !== null && !isMerged) res += `<div class="log-sep"></div>`;
+        if (prevName !== null && !isMerged) res.push(`<div class="log-sep"></div>`);
 
         if (isSystemEntry) nameColor = 'var(--accent-color)';
         if (theme === 'light' || theme === 'translight') {
@@ -2449,14 +2343,14 @@
             </div>
           `;
         }
-        res += `<div class="${entryClass}" style="${entryStyle}" data-idx="${globalIdx}">${nameHtml}<div class="text-col" ${textColStyle}${isEditing ? ' contenteditable="true"' : ''}>${displayText}</div>${editControlsHtml}</div>`;
+        res.push(`<div class="${entryClass}" style="${entryStyle}" data-idx="${globalIdx}">${nameHtml}<div class="text-col" ${textColStyle}${isEditing ? ' contenteditable="true"' : ''}>${displayText}</div>${editControlsHtml}</div>`);
         
         // Prev name and avatar are tracked for merge
         prevName = isNarrator ? null : log.name;
         prevAvatar = isNarrator ? null : avatarUrl;
       });
-      res += `</div>`;
-      return res;
+      res.push(`</div>`);
+      return res.join('');
     }
 
     const groups = [];
@@ -2472,9 +2366,10 @@
     });
 
     const isMain = (t) => t === '메인';
+    const groupParts = [];
 
     groups.forEach((g, i) => {
-      html += renderGroup(g.tab, g.logs);
+      groupParts.push(renderGroup(g.tab, g.logs));
       if (i < groups.length - 1) {
         const nextTab = groups[i + 1].tab;
         const curIsSystem = g.tab === 'system';
@@ -2484,21 +2379,23 @@
           // system to system, no divider
         } else if (curIsSystem && !nextIsSystem) {
           if (isMain(nextTab)) {
-            html += `<div class="log-sep-outer" style="display:block"></div>`;
+            groupParts.push(`<div class="log-sep-outer" style="display:block"></div>`);
           } else {
-            html += `<div class="log-sep-outer" style="display:block" data-next-tab-idx="${getTabIdx(nextTab)}"></div>`;
+            groupParts.push(`<div class="log-sep-outer" style="display:block" data-next-tab-idx="${getTabIdx(nextTab)}"></div>`);
           }
         } else if (!curIsSystem && nextIsSystem) {
           if (isMain(g.tab)) {
-            html += `<div class="log-sep-outer" style="display:block"></div>`;
+            groupParts.push(`<div class="log-sep-outer" style="display:block"></div>`);
           } else {
-            html += `<div class="log-sep-outer" style="display:block" data-after-tab-idx="${getTabIdx(g.tab)}"></div>`;
+            groupParts.push(`<div class="log-sep-outer" style="display:block" data-after-tab-idx="${getTabIdx(g.tab)}"></div>`);
           }
         } else if (isMain(g.tab) || isMain(nextTab)) {
-          html += `<div class="log-sep-outer" data-after-tab-idx="${getTabIdx(g.tab)}" data-next-tab-idx="${getTabIdx(nextTab)}"></div>`;
+          groupParts.push(`<div class="log-sep-outer" data-after-tab-idx="${getTabIdx(g.tab)}" data-next-tab-idx="${getTabIdx(nextTab)}"></div>`);
         }
       }
     });
+
+    html += groupParts.join('');
 
     if (bgmList.length > 0) {
       const seenLabels = new Set();
