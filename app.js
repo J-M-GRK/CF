@@ -848,10 +848,14 @@
       const avatarInput = item.querySelector('.char-avatar-input');
       const resetBtn = item.querySelector('.char-reset-btn');
 
-      const updateSettings = () => {
+      const updateSettings = async () => {
+        let avatarVal = avatarInput.value.trim();
+        if (avatarVal && avatarVal.startsWith('http')) {
+          avatarVal = await cropImageToSquare(avatarVal);
+        }
         state.charSettings[name] = {
           color: colorPicker.value,
-          avatar: avatarInput.value.trim()
+          avatar: avatarVal
         };
         saveSettings();
         renderPreview();
@@ -1048,15 +1052,10 @@
         }
       }
 
-      // Auto-set avatar image URL
+      // Auto-set avatar image URL only as fallback if character has a default room icon
       if (!state.charSettings[name].avatar) {
         if (charactersMap[name] && charactersMap[name].iconUrl) {
           state.charSettings[name].avatar = charactersMap[name].iconUrl;
-        } else {
-          const firstWithIcon = state.parsedLogs.find(log => log.name === name && log.iconUrl);
-          if (firstWithIcon && firstWithIcon.iconUrl) {
-            state.charSettings[name].avatar = firstWithIcon.iconUrl;
-          }
         }
       }
     });
@@ -1091,6 +1090,75 @@
 
     updateStatus('변환 완료', 'active');
     renderPreview();
+  }
+
+  // --- IMAGE 1:1 SQUARE CROPPING ENGINE ---
+  const croppedImageCache = new Map();
+
+  function cropImageToSquare(url) {
+    if (!url || typeof url !== 'string' || !url.startsWith('http')) return Promise.resolve(url);
+    if (croppedImageCache.has(url)) return Promise.resolve(croppedImageCache.get(url));
+
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+
+      const timer = setTimeout(() => {
+        croppedImageCache.set(url, url);
+        resolve(url);
+      }, 4000);
+
+      img.onload = () => {
+        clearTimeout(timer);
+        try {
+          const w = img.naturalWidth || img.width;
+          const h = img.naturalHeight || img.height;
+          
+          if (!w || !h || w === h) {
+            // Already 1:1 square
+            croppedImageCache.set(url, url);
+            return resolve(url);
+          }
+
+          // Not 1:1, crop based on smaller side
+          const minSide = Math.min(w, h);
+          const targetSize = Math.min(minSide, 300);
+
+          const canvas = document.createElement('canvas');
+          canvas.width = targetSize;
+          canvas.height = targetSize;
+          const ctx = canvas.getContext('2d');
+
+          let sx = 0, sy = 0;
+          if (w > h) {
+            // Horizontal image: center horizontally
+            sx = (w - h) / 2;
+            sy = 0;
+          } else {
+            // Vertical image (e.g. character standing): crop from top so head/face is preserved
+            sx = 0;
+            sy = 0;
+          }
+
+          ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, targetSize, targetSize);
+          const croppedDataUrl = canvas.toDataURL('image/png');
+          croppedImageCache.set(url, croppedDataUrl);
+          resolve(croppedDataUrl);
+        } catch (err) {
+          // If canvas export fails (e.g. CORS), fallback to original URL
+          croppedImageCache.set(url, url);
+          resolve(url);
+        }
+      };
+
+      img.onerror = () => {
+        clearTimeout(timer);
+        croppedImageCache.set(url, url);
+        resolve(url);
+      };
+
+      img.src = url;
+    });
   }
 
   // --- ROOM URL & FIRESTORE API LOADER ---
@@ -1220,7 +1288,12 @@
       })();
 
       let color = fields.color?.stringValue || (charactersMap[name] && charactersMap[name].color) || '#ffffff';
-      let iconUrl = fields.iconUrl?.stringValue || fields.avatarUrl?.stringValue || (charactersMap[name] && charactersMap[name].iconUrl) || null;
+      // Individual chat message's icon (selected standing for this chat)
+      let iconUrl = fields.iconUrl?.stringValue || fields.avatarUrl?.stringValue || null;
+      // Fallback to room character default only if chat has no icon
+      if (!iconUrl && charactersMap[name] && charactersMap[name].iconUrl) {
+        iconUrl = charactersMap[name].iconUrl;
+      }
       const createdAt = fields.createdAt?.timestampValue || doc.createTime || new Date().toISOString();
 
       return {
@@ -1238,6 +1311,27 @@
 
     logs.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
+    // Detect image dimensions and crop non-1:1 images based on smaller side to 1:1
+    const uniqueIcons = Array.from(new Set(logs.map(l => l.iconUrl).filter(Boolean)));
+    if (uniqueIcons.length > 0) {
+      showToast('프로필 이미지 1:1 비율 최적화 중...');
+      const cropMap = new Map();
+      await Promise.all(uniqueIcons.map(async (u) => {
+        const cropped = await cropImageToSquare(u);
+        cropMap.set(u, cropped);
+      }));
+      logs.forEach(l => {
+        if (l.iconUrl && cropMap.has(l.iconUrl)) {
+          l.iconUrl = cropMap.get(l.iconUrl);
+        }
+      });
+      for (const charName in charactersMap) {
+        if (charactersMap[charName].iconUrl && cropMap.has(charactersMap[charName].iconUrl)) {
+          charactersMap[charName].iconUrl = cropMap.get(charactersMap[charName].iconUrl);
+        }
+      }
+    }
+
     return { logs, roomTitle, charactersMap };
   }
 
@@ -1245,13 +1339,13 @@
   function handleFileSelect(file) {
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (e) => {
-      processLogHTML(e.target.result, file.name);
+    reader.onload = async (e) => {
+      await processLogHTML(e.target.result, file.name);
     };
     reader.readAsText(file);
   }
 
-  function processLogHTML(htmlText, fileName) {
+  async function processLogHTML(htmlText, fileName) {
     updateStatus('로딩 중...', 'editing');
     
     try {
@@ -1363,6 +1457,22 @@
             isFailure: /(실패|failure|펌블|fumble)[\s!?.]*$/i.test(fullText),
             hasDice: /(\d+[dD]\d+|\[\d+(?:,\s*\d+)*\]|→\s*\d+)/.test(text)
           };
+        });
+      }
+
+      // Detect image dimensions and crop non-1:1 images based on smaller side to 1:1
+      const uniqueIcons = Array.from(new Set(logs.map(l => l.iconUrl).filter(Boolean)));
+      if (uniqueIcons.length > 0) {
+        updateStatus(`이미지 1:1 크기 변환 중 (${uniqueIcons.length}개)...`, 'editing');
+        const cropMap = new Map();
+        await Promise.all(uniqueIcons.map(async (u) => {
+          const cropped = await cropImageToSquare(u);
+          cropMap.set(u, cropped);
+        }));
+        logs.forEach(l => {
+          if (l.iconUrl && cropMap.has(l.iconUrl)) {
+            l.iconUrl = cropMap.get(l.iconUrl);
+          }
         });
       }
 
@@ -1768,7 +1878,7 @@
       .tab-badge { position: absolute; top: 10px; right: 15px; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
       .log-entry { display: flex; gap: 15px; align-items: center; }
       .name-col { width: 150px; flex-shrink: 0; text-align: left; font-weight: bold; font-size: 11px; display: flex; align-items: center; justify-content: flex-start; gap: 8px; align-self: flex-start; padding-top: 2px; }
-      .avatar-img { width: 22px; height: 22px; border-radius: 8px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1); flex-shrink: 0; }
+      .avatar-img { width: 24px; height: 24px; border-radius: 8px; object-fit: cover; object-position: center top; border: 1px solid rgba(255,255,255,0.1); flex-shrink: 0; aspect-ratio: 1 / 1; }
       .text-col { flex-grow: 1; word-break: break-word; font-size: 12px; min-width: 0; white-space: pre-wrap; align-self: center; line-height: 1.8; }
       .log-sep { height: 1px; margin: 5px 0; border: none; }
       .log-sep-outer { display: none; height: 1px; margin: 5px 0; border: none; }
@@ -1789,7 +1899,7 @@
         .name-col { width: auto !important; font-size: 13px !important; flex-direction: row; padding-top: 0; opacity: 0.75; padding-left: 10px; }
         .name-col:empty { display: none; }
         .text-col { font-size: 13px !important; line-height: 1.6 !important; text-align: left !important; align-self: flex-start !important; width: 100%; padding-left: 10px; }
-        .avatar-img { width: 16px !important; height: 16px !important; }
+        .avatar-img { width: 18px !important; height: 18px !important; aspect-ratio: 1 / 1 !important; object-fit: cover !important; object-position: center top !important; }
         .tab-filter-btn { font-size: 10px; padding: 6px 10px; }
         
         .log-entry.narration-entry .text-col { padding-left: 0 !important; }
@@ -2249,13 +2359,11 @@
       let res = `<div class="log-group ${groupClass}" data-tab-idx="${getTabIdx(tab)}" ${styleAttr}>`;
       if (isCustom) res += `<div class="tab-badge">${escapeHtml(tab)}</div>`;
       let prevName = null;
+      let prevAvatar = null;
       
       logs.forEach((log) => {
         // Find matching parsedLogs global index to link back edits
         const globalIdx = parsedLogs.indexOf(log);
-        
-        let isMerged = (log.name === prevName);
-        if (prevName !== null && !isMerged) res += `<div class="log-sep"></div>`;
         
         const isSystemEntry = (log.name?.toLowerCase() === 'system');
         
@@ -2263,11 +2371,18 @@
         const charOverride = charSettings[log.name] || {};
         let nameColor = charOverride.color || log.color || 'inherit';
         if (nameColor !== 'inherit') nameColor = colorToHex(nameColor);
-        const avatarUrl = charOverride.avatar || log.iconUrl;
+        
+        // Per-chat icon takes priority unless user manually typed an explicit override in sidebar
+        const customAvatar = (charOverride.avatar && charOverride.avatar.trim()) ? charOverride.avatar.trim() : null;
+        const avatarUrl = customAvatar || log.iconUrl || null;
 
         // Check if this speaker should be formatted as a Narrator (only in the Main tab)
         const isMainTab = tab === '메인' || (tab && tab.toLowerCase() === 'main');
         const isNarrator = isMainTab && narrators.includes(log.name);
+
+        // Merge only if both speaker name AND avatar image are identical
+        let isMerged = !isNarrator && (log.name === prevName && avatarUrl === prevAvatar);
+        if (prevName !== null && !isMerged) res += `<div class="log-sep"></div>`;
 
         if (isSystemEntry) nameColor = 'var(--accent-color)';
         if (theme === 'light' || theme === 'translight') {
@@ -2300,7 +2415,7 @@
           if (isSystemTab) avatarHtml = `<div class="avatar-img" style="visibility:hidden;"></div>`;
           else if (!isMerged && avatarUrl) avatarHtml = `<img src="${escapeHtml(avatarUrl)}" class="avatar-img">`;
           else if (!isMerged && !avatarUrl) avatarHtml = `<div class="avatar-img" style="background:#444;"></div>`;
-          else avatarHtml = `<div style="width:22px; flex-shrink:0;"></div>`;
+          else avatarHtml = `<div style="width:24px; height:24px; flex-shrink:0;"></div>`;
         }
         
         let nameHtml = "";
@@ -2332,8 +2447,9 @@
         }
         res += `<div class="${entryClass}" style="${entryStyle}" data-idx="${globalIdx}">${nameHtml}<div class="text-col" ${textColStyle}${isEditing ? ' contenteditable="true"' : ''}>${displayText}</div>${editControlsHtml}</div>`;
         
-        // Prev name is not merged across narrators
+        // Prev name and avatar are tracked for merge
         prevName = isNarrator ? null : log.name;
+        prevAvatar = isNarrator ? null : avatarUrl;
       });
       res += `</div>`;
       return res;

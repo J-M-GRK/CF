@@ -375,7 +375,7 @@
             <li>아래 코드를 복사해 붙여넣고 <kbd style="background:rgba(255,255,255,0.1); padding:2px 5px; border-radius:3px;">Enter</kbd>를 누르면 토큰이 즉시 복사됩니다.</li>
           </ol>
           <div style="position: relative;">
-            <textarea id="tokenScriptCode" readonly class="token-script-box" rows="3">indexedDB.open('firebaseLocalStorageDb').onsuccess=e=>{e.target.result.transaction('firebaseLocalStorage').objectStore('firebaseLocalStorage').getAll().onsuccess=ev=>{const t=ev.target.result[0]?.value?.stsTokenManager?.accessToken;if(t){navigator.clipboard.writeText(t);alert('코코포리아 토큰이 클립보드에 복사되었습니다!');}else{alert('로그인 정보를 찾을 수 없습니다.');}}};</textarea>
+            <textarea id="tokenScriptCode" readonly class="token-script-box" rows="4">indexedDB.open('firebaseLocalStorageDb').onsuccess=e=>{e.target.result.transaction('firebaseLocalStorage').objectStore('firebaseLocalStorage').getAll().onsuccess=async ev=>{const t=ev.target.result[0]?.value?.stsTokenManager?.accessToken;if(!t){alert('로그인 정보를 찾을 수 없습니다.');return;}let copied=false;if(typeof copy==='function'){try{copy(t);copied=true;}catch{}}if(!copied&&navigator.clipboard?.writeText){try{await navigator.clipboard.writeText(t);copied=true;}catch{}}if(!copied){try{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();copied=document.execCommand('copy');document.body.removeChild(ta);}catch{}}console.log('=== 코코포리아 토큰 ===\n',t);if(copied){alert('토큰이 클립보드에 복사되었습니다!\n(실패 시 콘솔 창의 토큰을 복사하세요)');}else{alert('자동 복사 실패. 콘솔 창에 출력된 토큰을 복사해주세요.');}}};</textarea>
             <button id="copyTokenScriptBtn" class="btn-copy-script" type="button">스크립트 복사</button>
           </div>
         </div>
