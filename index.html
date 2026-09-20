@@ -39,23 +39,94 @@
     <!-- Sidebar: Settings -->
     <aside class="sidebar">
       
-      <!-- Section 1: Upload File -->
+      <!-- Section 1: Import / Upload Log -->
       <section class="sidebar-section">
-        <h2 class="section-title">로그 파일 업로드</h2>
-        <div id="dropzone" class="dropzone">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="17 8 12 3 7 8"></polyline>
-            <line x1="12" y1="3" x2="12" y2="15"></line>
-          </svg>
-          <div class="dropzone-text">코코포리아 HTML 파일을 드래그하여 놓거나</div>
-          <div class="dropzone-subtext">여기를 클릭하여 파일 업로드 (.html)</div>
-          <input type="file" id="logFileInput" accept=".html" style="display:none;">
+        <h2 class="section-title">로그 불러오기</h2>
+        
+        <!-- Import Mode Tabs -->
+        <div class="import-mode-tabs">
+          <button id="tabModeUrl" class="import-mode-tab active" type="button">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="2" y1="12" x2="22" y2="12"></line>
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+            </svg>
+            방 주소 (이미지 포함)
+          </button>
+          <button id="tabModeFile" class="import-mode-tab" type="button">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            파일 업로드
+          </button>
+        </div>
+
+        <!-- URL Import Panel -->
+        <div id="urlImportPanel" class="import-panel">
+          <div class="url-input-container">
+            <div class="url-input-wrapper">
+              <input type="text" id="logUrlInput" class="input-text url-input" placeholder="방 주소 (예: https://ccfolia.com/rooms/xxx)">
+              <button id="apiLoadBtn" class="btn-primary btn-api-load" type="button">
+                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span id="apiLoadBtnText">불러오기</span>
+              </button>
+            </div>
+            <div class="url-notice-badge">
+              <span>🖼️ 캐릭터 프로필 사진(아바타)이 함께 로드됩니다.</span>
+            </div>
+          </div>
+
+          <!-- Collapsible Token / Advanced Options -->
+          <details id="tokenDetails" class="token-details">
+            <summary class="token-summary">
+              <span>🔑 비공개 방 토큰 설정 (선택)</span>
+              <span class="summary-arrow">▼</span>
+            </summary>
+            <div class="token-content">
+              <div class="token-input-row">
+                <input type="password" id="apiTokenInput" class="input-text token-input" placeholder="Firebase 인증 토큰 (비공개 방 필요 시)">
+                <button id="tokenToggleVisibilityBtn" class="btn-token-toggle" type="button" title="토큰 보기/가리기">👁️</button>
+              </div>
+              <div class="token-options-row">
+                <label class="token-save-label">
+                  <input type="checkbox" id="apiTokenSaveCheck" checked>
+                  <span>이 브라우저에 토큰 저장</span>
+                </label>
+                <button id="tokenHelpBtn" class="btn-text-link" type="button">💡 토큰 복사 방법</button>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- File Upload Panel -->
+        <div id="fileImportPanel" class="import-panel" style="display:none;">
+          <div id="dropzone" class="dropzone">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            <div class="dropzone-text">코코포리아 HTML 파일을 드래그하여 놓거나</div>
+            <div class="dropzone-subtext">여기를 클릭하여 파일 업로드 (.html)</div>
+            <input type="file" id="logFileInput" accept=".html" style="display:none;">
+          </div>
+          <div class="file-notice-tip">※ 코코포리아 파일 업로드 변환 시에는 HTML 파일 구조상 프로필 사진이 포함되지 않을 수 있습니다.</div>
         </div>
         
+        <!-- File Info Display when loaded -->
         <div id="fileInfo" class="file-info">
-          <span id="fileName" class="file-name">trpg_log.html</span>
-          <button id="fileRemoveBtn" class="file-remove-btn" title="파일 제거">✕</button>
+          <div class="file-info-main">
+            <span id="fileTypeBadge" class="file-type-badge">방 API</span>
+            <span id="fileName" class="file-name">trpg_log.html</span>
+            <span id="logCountBadge" class="log-count-badge">0개</span>
+          </div>
+          <button id="fileRemoveBtn" class="file-remove-btn" title="로그 지우고 새로 불러오기">✕</button>
         </div>
       </section>
       
@@ -258,8 +329,8 @@
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" d="M9 13h6m-3-3v6m-9 1V4a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
           </svg>
-          <h3>코코포리아 로그 파일이 없습니다.</h3>
-          <p>왼쪽의 업로드 영역에 HTML 파일을 놓거나 업로드하여 로그를 불러와 주세요.</p>
+          <h3>코코포리아 로그가 없습니다.</h3>
+          <p>왼쪽에서 방 주소를 입력하거나 HTML 파일을 업로드하여 로그를 불러와 주세요.</p>
         </div>
       </div>
       
@@ -286,6 +357,37 @@
     </div>
   </div>
 
-  <script src="app.js?v=1.0.2"></script>
+  <!-- Token Guide Modal -->
+  <div id="tokenHelpModal" class="modal-overlay">
+    <div class="modal-card" style="max-width: 520px;">
+      <div class="modal-header">
+        <h3>코코포리아 인증 토큰 얻는 방법</h3>
+        <button id="tokenHelpCloseBtn" class="modal-close-btn" type="button">✕</button>
+      </div>
+      <div class="modal-body" style="font-size: 13px; line-height: 1.6; color: var(--text-primary);">
+        <p style="margin-bottom: 12px; color: var(--text-secondary);">비공개 방이거나 권한이 필요한 방은 본인 계정의 인증 토큰이 필요합니다. 아래 방법으로 <strong>1초 만에</strong> 토큰을 복사할 수 있습니다.</p>
+        
+        <div style="background: rgba(255,255,255,0.04); border: 1px solid var(--border-color); border-radius: 6px; padding: 12px; margin-bottom: 12px;">
+          <strong style="color: var(--accent); display: block; margin-bottom: 6px;">💡 코코포리아 콘솔(F12)에서 자동 추출</strong>
+          <ol style="margin-left: 18px; margin-bottom: 10px; font-size: 12px; color: var(--text-secondary); padding-left: 0;">
+            <li>코코포리아(<a href="https://ccfolia.com" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:underline;">ccfolia.com</a>) 탭에서 <kbd style="background:rgba(255,255,255,0.1); padding:2px 5px; border-radius:3px;">F12</kbd> (개발자 도구)를 누릅니다.</li>
+            <li><strong>Console(콘솔)</strong> 탭을 선택합니다.</li>
+            <li>아래 코드를 복사해 붙여넣고 <kbd style="background:rgba(255,255,255,0.1); padding:2px 5px; border-radius:3px;">Enter</kbd>를 누르면 토큰이 즉시 복사됩니다.</li>
+          </ol>
+          <div style="position: relative;">
+            <textarea id="tokenScriptCode" readonly class="token-script-box" rows="3">indexedDB.open('firebaseLocalStorageDb').onsuccess=e=>{e.target.result.transaction('firebaseLocalStorage').objectStore('firebaseLocalStorage').getAll().onsuccess=ev=>{const t=ev.target.result[0]?.value?.stsTokenManager?.accessToken;if(t){navigator.clipboard.writeText(t);alert('코코포리아 토큰이 클립보드에 복사되었습니다!');}else{alert('로그인 정보를 찾을 수 없습니다.');}}};</textarea>
+            <button id="copyTokenScriptBtn" class="btn-copy-script" type="button">스크립트 복사</button>
+          </div>
+        </div>
+        
+        <p style="font-size: 11px; color: var(--text-muted); margin: 0;">※ 복사한 토큰은 브라우저 내(localStorage)에만 안전하게 보관되며 외부 서버로 전송되지 않습니다.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="tokenHelpConfirmBtn" class="btn-primary" type="button" style="padding: 6px 16px;">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=1.0.3"></script>
 </body>
 </html>

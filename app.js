@@ -16,7 +16,10 @@
     fileName: '',
     rangeSelectMode: false,
     startIdx: null,
-    endIdx: null
+    endIdx: null,
+    importMode: 'url',     // 'url' or 'file'
+    apiToken: '',
+    roomUrl: ''
   };
 
   // --- LOCAL STORAGE HELPERS ---
@@ -28,7 +31,9 @@
     tabColors: 'cclog_tab_colors',
     narrators: 'cclog_narrators',
     fontSetting: 'cclog_font_setting',
-    siteTheme: 'cclog_site_theme'
+    siteTheme: 'cclog_site_theme',
+    apiToken: 'cclog_ccfolia_token',
+    lastUrl: 'cclog_last_room_url'
   };
 
   function loadSettings() {
@@ -56,6 +61,9 @@
     } catch(e) {
       state.fontSetting = { type: 'none', family: '', importUrl: '', fontFaceCSS: '' };
     }
+
+    state.apiToken = localStorage.getItem(CONFIG_KEYS.apiToken) || '';
+    state.roomUrl = localStorage.getItem(CONFIG_KEYS.lastUrl) || '';
   }
 
   function saveSettings() {
@@ -66,6 +74,17 @@
     localStorage.setItem(CONFIG_KEYS.tabColors, JSON.stringify(state.tabColors));
     localStorage.setItem(CONFIG_KEYS.narrators, JSON.stringify(state.narrators));
     localStorage.setItem(CONFIG_KEYS.fontSetting, JSON.stringify(state.fontSetting));
+
+    const saveTokenCheck = document.getElementById('apiTokenSaveCheck');
+    if (!saveTokenCheck || saveTokenCheck.checked) {
+      if (state.apiToken) localStorage.setItem(CONFIG_KEYS.apiToken, state.apiToken);
+    } else {
+      localStorage.removeItem(CONFIG_KEYS.apiToken);
+    }
+
+    if (state.roomUrl) {
+      localStorage.setItem(CONFIG_KEYS.lastUrl, state.roomUrl);
+    }
   }
 
   // --- THEME DATA DEFINITIONS ---
@@ -196,6 +215,160 @@
       }
     });
 
+    // Import Mode Switcher (URL vs File)
+    const tabModeUrl = document.getElementById('tabModeUrl');
+    const tabModeFile = document.getElementById('tabModeFile');
+    const urlImportPanel = document.getElementById('urlImportPanel');
+    const fileImportPanel = document.getElementById('fileImportPanel');
+
+    const switchImportMode = (mode) => {
+      state.importMode = mode;
+      if (mode === 'url') {
+        tabModeUrl?.classList.add('active');
+        tabModeFile?.classList.remove('active');
+        if (urlImportPanel) urlImportPanel.style.display = 'block';
+        if (fileImportPanel) fileImportPanel.style.display = 'none';
+      } else {
+        tabModeFile?.classList.add('active');
+        tabModeUrl?.classList.remove('active');
+        if (urlImportPanel) urlImportPanel.style.display = 'none';
+        if (fileImportPanel) fileImportPanel.style.display = 'block';
+      }
+    };
+
+    tabModeUrl?.addEventListener('click', () => switchImportMode('url'));
+    tabModeFile?.addEventListener('click', () => switchImportMode('file'));
+
+    // URL Import Controls
+    const logUrlInput = document.getElementById('logUrlInput');
+    const apiLoadBtn = document.getElementById('apiLoadBtn');
+    const apiLoadBtnText = document.getElementById('apiLoadBtnText');
+    const apiTokenInput = document.getElementById('apiTokenInput');
+    const apiTokenSaveCheck = document.getElementById('apiTokenSaveCheck');
+    const tokenToggleVisibilityBtn = document.getElementById('tokenToggleVisibilityBtn');
+
+    if (logUrlInput && state.roomUrl) {
+      logUrlInput.value = state.roomUrl;
+    }
+    if (apiTokenInput && state.apiToken) {
+      apiTokenInput.value = state.apiToken;
+    }
+
+    logUrlInput?.addEventListener('input', (e) => {
+      state.roomUrl = e.target.value.trim();
+      saveSettings();
+    });
+
+    logUrlInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        apiLoadBtn?.click();
+      }
+    });
+
+    apiTokenInput?.addEventListener('input', (e) => {
+      state.apiToken = e.target.value.trim();
+      saveSettings();
+    });
+
+    apiTokenSaveCheck?.addEventListener('change', () => {
+      saveSettings();
+    });
+
+    tokenToggleVisibilityBtn?.addEventListener('click', () => {
+      if (!apiTokenInput) return;
+      if (apiTokenInput.type === 'password') {
+        apiTokenInput.type = 'text';
+        tokenToggleVisibilityBtn.textContent = '🔒';
+      } else {
+        apiTokenInput.type = 'password';
+        tokenToggleVisibilityBtn.textContent = '👁️';
+      }
+    });
+
+    // Token Help Modal
+    const tokenHelpModal = document.getElementById('tokenHelpModal');
+    const tokenHelpBtn = document.getElementById('tokenHelpBtn');
+    const tokenHelpCloseBtn = document.getElementById('tokenHelpCloseBtn');
+    const tokenHelpConfirmBtn = document.getElementById('tokenHelpConfirmBtn');
+    const copyTokenScriptBtn = document.getElementById('copyTokenScriptBtn');
+    const tokenScriptCode = document.getElementById('tokenScriptCode');
+
+    const showTokenHelpModal = () => {
+      if (tokenHelpModal) tokenHelpModal.style.display = 'flex';
+    };
+    const hideTokenHelpModal = () => {
+      if (tokenHelpModal) tokenHelpModal.style.display = 'none';
+    };
+
+    tokenHelpBtn?.addEventListener('click', showTokenHelpModal);
+    tokenHelpCloseBtn?.addEventListener('click', hideTokenHelpModal);
+    tokenHelpConfirmBtn?.addEventListener('click', hideTokenHelpModal);
+    tokenHelpModal?.addEventListener('click', (e) => {
+      if (e.target === tokenHelpModal) hideTokenHelpModal();
+    });
+
+    copyTokenScriptBtn?.addEventListener('click', async () => {
+      if (tokenScriptCode) {
+        try {
+          await navigator.clipboard.writeText(tokenScriptCode.value);
+          showToast('추출 스크립트가 복사되었습니다! 코코포리아 콘솔에 붙여넣으세요.');
+        } catch(e) {
+          tokenScriptCode.select();
+          document.execCommand('copy');
+          showToast('스크립트가 복사되었습니다!');
+        }
+      }
+    });
+
+    // API Load Button Action
+    apiLoadBtn?.addEventListener('click', async () => {
+      const url = (logUrlInput?.value || '').trim();
+      if (!url) {
+        showToast('코코포리아 방 주소를 입력해주세요.');
+        logUrlInput?.focus();
+        return;
+      }
+      const roomId = extractRoomId(url);
+      if (!roomId) {
+        alert('올바른 코코포리아 방 주소 형식이 아닙니다.\n예: https://ccfolia.com/rooms/1234567890');
+        return;
+      }
+
+      state.roomUrl = url;
+      state.apiToken = (apiTokenInput?.value || '').trim();
+      saveSettings();
+
+      apiLoadBtn.disabled = true;
+      const origText = apiLoadBtnText ? apiLoadBtnText.textContent : '불러오기';
+      if (apiLoadBtnText) apiLoadBtnText.textContent = '가져오는 중...';
+
+      try {
+        const { logs, roomTitle, charactersMap } = await fetchLogsFromAPI(roomId, state.apiToken);
+        if (logs && logs.length > 0) {
+          const displayName = roomTitle ? `${roomTitle}.html` : `room_${roomId}.html`;
+          setLoadedLogs(logs, displayName, 'api', charactersMap);
+          showToast(`✅ ${logs.length.toLocaleString()}개 로그를 성공적으로 불러왔습니다!`);
+        }
+      } catch (err) {
+        console.error('API Log Fetch Error:', err);
+        if (err.message === 'AUTH_REQUIRED') {
+          const tokenDetails = document.getElementById('tokenDetails');
+          if (tokenDetails) tokenDetails.open = true;
+          apiTokenInput?.focus();
+          
+          if (confirm('방에 접근할 권한이 없습니다 (비공개 방이거나 로그인 필요).\n코코포리아 인증 토큰을 설정해야 합니다.\n\n토큰을 쉽게 얻는 방법 안내를 확인하시겠습니까?')) {
+            showTokenHelpModal();
+          }
+        } else {
+          alert('로그 가져오기 실패:\n' + err.message);
+        }
+        updateStatus('가져오기 실패', 'muted');
+      } finally {
+        apiLoadBtn.disabled = false;
+        if (apiLoadBtnText) apiLoadBtnText.textContent = origText;
+      }
+    });
+
     // File Input & Drag and Drop
     const fileInput = document.getElementById('logFileInput');
     const dropzone = document.getElementById('dropzone');
@@ -203,15 +376,15 @@
     const fileNameDisplay = document.getElementById('fileName');
     const fileRemoveBtn = document.getElementById('fileRemoveBtn');
 
-    dropzone.addEventListener('click', () => fileInput.click());
+    dropzone?.addEventListener('click', () => fileInput?.click());
     
-    fileInput.addEventListener('change', (e) => {
+    fileInput?.addEventListener('change', (e) => {
       handleFileSelect(e.target.files[0]);
     });
 
     // Drag-drop events
     ['dragenter', 'dragover'].forEach(eventName => {
-      dropzone.addEventListener(eventName, (e) => {
+      dropzone?.addEventListener(eventName, (e) => {
         e.preventDefault();
         e.stopPropagation();
         dropzone.classList.add('dragover');
@@ -219,21 +392,21 @@
     });
 
     ['dragleave', 'drop'].forEach(eventName => {
-      dropzone.addEventListener(eventName, (e) => {
+      dropzone?.addEventListener(eventName, (e) => {
         e.preventDefault();
         e.stopPropagation();
         dropzone.classList.remove('dragover');
       }, false);
     });
 
-    dropzone.addEventListener('drop', (e) => {
+    dropzone?.addEventListener('drop', (e) => {
       const dt = e.dataTransfer;
       const file = dt.files[0];
       handleFileSelect(file);
     });
 
-    fileRemoveBtn.addEventListener('click', () => {
-      fileInput.value = '';
+    fileRemoveBtn?.addEventListener('click', () => {
+      if (fileInput) fileInput.value = '';
       state.parsedLogs = [];
       state.uniqueTabs = [];
       state.uniqueCharacters = [];
@@ -250,9 +423,19 @@
         document.getElementById('rangeSelectBanner').style.display = 'none';
       }
       
-      fileInfo.style.display = 'none';
-      dropzone.style.display = 'flex';
-      document.getElementById('emptyState').style.display = 'flex';
+      if (fileInfo) fileInfo.style.display = 'none';
+      
+      // Restore active import mode panel
+      if (state.importMode === 'url') {
+        if (urlImportPanel) urlImportPanel.style.display = 'block';
+        if (fileImportPanel) fileImportPanel.style.display = 'none';
+      } else {
+        if (urlImportPanel) urlImportPanel.style.display = 'none';
+        if (fileImportPanel) fileImportPanel.style.display = 'block';
+      }
+      
+      const emptyState = document.getElementById('emptyState');
+      if (emptyState) emptyState.style.display = 'flex';
       
       updateStatus('파일 없음', 'muted');
       renderTabColorList();
@@ -814,6 +997,250 @@
     }
   }
 
+  // --- LOADED LOGS STATE SYNCHRONIZATION ---
+  function setLoadedLogs(logs, displayName, sourceType = 'file', charactersMap = {}) {
+    state.fileName = displayName;
+    state.parsedLogs = logs.filter(log => log.text && log.text.trim() !== '');
+    
+    // Reset range selection when a new log is loaded
+    state.rangeSelectMode = false;
+    state.startIdx = null;
+    state.endIdx = null;
+    const rToggle = document.getElementById('rangeSelectModeToggle');
+    const rBanner = document.getElementById('rangeSelectBanner');
+    if (rToggle) rToggle.classList.remove('active');
+    if (rBanner) rBanner.style.display = 'none';
+
+    // Extract Unique tabs
+    const tabSet = new Set();
+    state.parsedLogs.forEach(log => {
+      if (log.tab && log.tab !== 'system') tabSet.add(log.tab);
+    });
+    state.uniqueTabs = Array.from(tabSet);
+
+    // Extract Unique characters
+    const charSet = new Set();
+    state.parsedLogs.forEach(log => {
+      if (log.name && log.name.toLowerCase() !== 'system') {
+        charSet.add(log.name);
+      }
+    });
+    state.uniqueCharacters = Array.from(charSet);
+
+    // Auto-populate parsed colors and avatars to state.charSettings if not already defined
+    state.uniqueCharacters.forEach(name => {
+      if (!state.charSettings[name]) {
+        state.charSettings[name] = {};
+      }
+      
+      // Auto-set color
+      if (!state.charSettings[name].color) {
+        if (charactersMap[name] && charactersMap[name].color) {
+          state.charSettings[name].color = colorToHex(charactersMap[name].color);
+        } else {
+          const firstEntry = state.parsedLogs.find(log => log.name === name);
+          if (firstEntry && firstEntry.color) {
+            const parsedHex = colorToHex(firstEntry.color);
+            if (parsedHex && parsedHex.toLowerCase() !== '#ffffff') {
+              state.charSettings[name].color = parsedHex;
+            }
+          }
+        }
+      }
+
+      // Auto-set avatar image URL
+      if (!state.charSettings[name].avatar) {
+        if (charactersMap[name] && charactersMap[name].iconUrl) {
+          state.charSettings[name].avatar = charactersMap[name].iconUrl;
+        } else {
+          const firstWithIcon = state.parsedLogs.find(log => log.name === name && log.iconUrl);
+          if (firstWithIcon && firstWithIcon.iconUrl) {
+            state.charSettings[name].avatar = firstWithIcon.iconUrl;
+          }
+        }
+      }
+    });
+    saveSettings();
+
+    // UI feedback elements update
+    const fileTypeBadge = document.getElementById('fileTypeBadge');
+    if (fileTypeBadge) {
+      fileTypeBadge.textContent = sourceType === 'api' ? '방 API' : 'HTML 파일';
+    }
+    const fileNameEl = document.getElementById('fileName');
+    if (fileNameEl) {
+      fileNameEl.textContent = displayName;
+    }
+    const logCountBadge = document.getElementById('logCountBadge');
+    if (logCountBadge) {
+      logCountBadge.textContent = `${state.parsedLogs.length.toLocaleString()}개`;
+    }
+
+    const fileInfo = document.getElementById('fileInfo');
+    if (fileInfo) fileInfo.style.display = 'flex';
+    const urlPanel = document.getElementById('urlImportPanel');
+    if (urlPanel) urlPanel.style.display = 'none';
+    const filePanel = document.getElementById('fileImportPanel');
+    if (filePanel) filePanel.style.display = 'none';
+    const emptyState = document.getElementById('emptyState');
+    if (emptyState) emptyState.style.display = 'none';
+
+    renderTabColorList();
+    renderCharSettingsList();
+    renderNarratorList();
+
+    updateStatus('변환 완료', 'active');
+    renderPreview();
+  }
+
+  // --- ROOM URL & FIRESTORE API LOADER ---
+  function extractRoomId(input) {
+    if (!input) return null;
+    input = input.trim();
+    const match = input.match(/rooms\/([a-zA-Z0-9_-]+)/);
+    if (match) return match[1];
+    if (/^[a-zA-Z0-9_-]{8,}$/.test(input)) return input;
+    return null;
+  }
+
+  async function fetchLogsFromAPI(roomId, userToken) {
+    let token = userToken || state.apiToken;
+    
+    // Check Chrome extension tabs if running in extension context
+    if (!token && typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab && tab.url && tab.url.includes('ccfolia.com')) {
+          const res = await chrome.tabs.sendMessage(tab.id, { action: 'getAuthToken' }).catch(() => null);
+          if (res && res.token) token = res.token;
+        } else {
+          const tabs = await chrome.tabs.query({ url: "*://ccfolia.com/*" });
+          if (tabs.length > 0) {
+            const res = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getAuthToken' }).catch(() => null);
+            if (res && res.token) token = res.token;
+          }
+        }
+      } catch (e) { console.warn('Extension token query note:', e); }
+    }
+
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    updateStatus('코코포리아 연결 중...', 'editing');
+
+    // Supplementary fetches: Character portraits and Room title in parallel
+    const charactersMap = {};
+    let roomTitle = '';
+
+    const charPromise = fetch(`https://firestore.googleapis.com/v1/projects/ccfolia-160aa/databases/(default)/documents/rooms/${roomId}/characters?pageSize=300`, { headers })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data && data.documents) {
+          data.documents.forEach(doc => {
+            const fields = doc.fields || {};
+            const name = fields.name?.stringValue;
+            if (name) {
+              charactersMap[name] = {
+                iconUrl: fields.iconUrl?.stringValue || fields.avatarUrl?.stringValue || '',
+                color: fields.color?.stringValue || ''
+              };
+            }
+          });
+        }
+      })
+      .catch(e => console.warn('Characters API fetch note:', e));
+
+    const roomPromise = fetch(`https://firestore.googleapis.com/v1/projects/ccfolia-160aa/databases/(default)/documents/rooms/${roomId}`, { headers })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data && data.fields) {
+          roomTitle = data.fields.name?.stringValue || data.fields.title?.stringValue || '';
+        }
+      })
+      .catch(e => console.warn('Room info API fetch note:', e));
+
+    // Paginated fetch of messages
+    let allMessages = [];
+    let pageToken = '';
+    
+    while (true) {
+      const apiUrl = `https://firestore.googleapis.com/v1/projects/ccfolia-160aa/databases/(default)/documents/rooms/${roomId}/messages?pageSize=300${pageToken ? '&pageToken=' + pageToken : ''}`;
+      const res = await fetch(apiUrl, { headers });
+      
+      if (!res.ok) {
+        if (res.status === 403 || res.status === 401) {
+          throw new Error('AUTH_REQUIRED');
+        }
+        throw new Error(`방에 접근할 수 없습니다 (HTTP ${res.status}). 올바른 주소인지 확인해주세요.`);
+      }
+      
+      const data = await res.json();
+      if (data.documents && data.documents.length > 0) {
+        allMessages = allMessages.concat(data.documents);
+        showToast(`메시지 로딩 중... (${allMessages.length.toLocaleString()}개)`);
+        updateStatus(`로딩 중 (${allMessages.length.toLocaleString()}개)`, 'editing');
+      }
+      
+      if (data.nextPageToken) {
+        pageToken = data.nextPageToken;
+      } else {
+        break;
+      }
+    }
+
+    // Wait for supplementary fetches to finish
+    await Promise.all([charPromise, roomPromise]);
+
+    if (allMessages.length === 0) {
+      throw new Error('방에 저장된 채팅 로그가 없습니다.');
+    }
+
+    // Parse Firestore documents
+    const logs = allMessages.map(doc => {
+      const fields = doc.fields || {};
+      let text = fields.text?.stringValue || '';
+      const diceResult = fields.extend?.mapValue?.fields?.roll?.mapValue?.fields?.result?.stringValue;
+      if (diceResult) text += ' ' + diceResult;
+      const fullText = text;
+
+      let name = fields.name?.stringValue || 'System';
+      if (name === 'System' || name === '시스템') {
+        const match = text.match(/^(.+?)\s*-\s*(판정|선언|Check|Roll)\s+(.*)/);
+        if (match) {
+          name = match[1].trim();
+          text = match[3].trim();
+        }
+      }
+
+      const tab = (() => {
+        const nm = name.toLowerCase();
+        if (nm === 'system') return 'system';
+        const t = fields.channelName?.stringValue || fields.tab?.stringValue || '메인';
+        return normalizeTabName(t);
+      })();
+
+      let color = fields.color?.stringValue || (charactersMap[name] && charactersMap[name].color) || '#ffffff';
+      let iconUrl = fields.iconUrl?.stringValue || fields.avatarUrl?.stringValue || (charactersMap[name] && charactersMap[name].iconUrl) || null;
+      const createdAt = fields.createdAt?.timestampValue || doc.createTime || new Date().toISOString();
+
+      return {
+        tab,
+        name,
+        text,
+        color,
+        iconUrl,
+        createdAt,
+        isSuccess: /(성공|success|대성공|크리티컬|critical)[\s!?.]*$/i.test(fullText),
+        isFailure: /(실패|failure|펌블|fumble)[\s!?.]*$/i.test(fullText),
+        hasDice: !!diceResult || /(\d+[dD]\d+|\[\d+(?:,\s*\d+)*\]|→\s*\d+)/.test(text)
+      };
+    }).filter(log => log.text && log.text.trim() !== '');
+
+    logs.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    return { logs, roomTitle, charactersMap };
+  }
+
   // --- HTML FILE PARSER ---
   function handleFileSelect(file) {
     if (!file) return;
@@ -825,23 +1252,6 @@
   }
 
   function processLogHTML(htmlText, fileName) {
-    state.fileName = fileName;
-    
-    // Reset range selection when a new file is loaded
-    state.rangeSelectMode = false;
-    state.startIdx = null;
-    state.endIdx = null;
-    const rToggle = document.getElementById('rangeSelectModeToggle');
-    const rBanner = document.getElementById('rangeSelectBanner');
-    if (rToggle) rToggle.classList.remove('active');
-    if (rBanner) rBanner.style.display = 'none';
-
-    // UI feedback
-    document.getElementById('fileName').textContent = fileName;
-    document.getElementById('fileInfo').style.display = 'flex';
-    document.getElementById('dropzone').style.display = 'none';
-    document.getElementById('emptyState').style.display = 'none';
-    
     updateStatus('로딩 중...', 'editing');
     
     try {
@@ -858,146 +1268,105 @@
       let logs = [];
       
       if (dls.length > 0) {
-          // Log Format type 1 (definition list based)
-          logs = Array.from(dls).map(dl => {
-            let rawClass = dl.className || '';
-            let tab = '메인';
-            if (rawClass.includes('main')) tab = '메인';
-            else if (rawClass.includes('zatsudan')) tab = '잡담';
-            else if (rawClass.includes('tab_0') || rawClass.includes('info')) tab = 'info';
-            else if (rawClass.includes('tab_1') || rawClass.includes('secret')) tab = 'secret';
-            else tab = 'custom';
+        // Log Format type 1 (definition list based)
+        logs = Array.from(dls).map(dl => {
+          let rawClass = dl.className || '';
+          let tab = '메인';
+          if (rawClass.includes('main')) tab = '메인';
+          else if (rawClass.includes('zatsudan')) tab = '잡담';
+          else if (rawClass.includes('tab_0') || rawClass.includes('info')) tab = 'info';
+          else if (rawClass.includes('tab_1') || rawClass.includes('secret')) tab = 'secret';
+          else tab = 'custom';
 
-            const headerLabels = doc.querySelectorAll('header label');
-            headerLabels.forEach(lbl => {
-              const input = lbl.querySelector('input');
-              if (input && rawClass.includes(input.id)) tab = lbl.textContent.trim();
-            });
-
-            tab = normalizeTabName(tab);
-
-            let name = dl.querySelector('dt')?.textContent?.trim() || 'System';
-            if (name.toLowerCase() === 'system') tab = 'system';
-            
-            let text = decodeHTML(dl.querySelector('dd')?.innerHTML || '');
-            const imgEl = dl.querySelector('img[alt="avatar"]') || dl.querySelector('img');
-            const iconUrl = imgEl ? imgEl.src : null;
-            const fullText = text;
-            
-            let color = dl.style.color;
-            if (!color) {
-              const dt = dl.querySelector('dt');
-              const dd = dl.querySelector('dd');
-              color = dt?.style.color || dd?.style.color || '#fff';
-            }
-            
-            return {
-              tab, name, text, iconUrl, color,
-              isSuccess: /(성공|success|대성공|크리티컬|critical)[\s!?.]*$/i.test(fullText),
-              isFailure: /(실패|failure|펌블|fumble)[\s!?.]*$/i.test(fullText),
-              hasDice: /(\d+[dD]\d+|\[\d+(?:,\s*\d+)*\]|→\s*\d+)/.test(text)
-            };
+          const headerLabels = doc.querySelectorAll('header label');
+          headerLabels.forEach(lbl => {
+            const input = lbl.querySelector('input');
+            if (input && rawClass.includes(input.id)) tab = lbl.textContent.trim();
           });
-        } else {
-          // Log Format type 2 (paragraph based)
-          logs = Array.from(doc.querySelectorAll('p')).map(p => {
-            let tab = '메인', name = 'System', text = '', color = '#fff';
-            const spans = p.querySelectorAll('span');
-            
-            if (p.style.color) {
-              color = p.style.color;
+
+          tab = normalizeTabName(tab);
+
+          let name = dl.querySelector('dt')?.textContent?.trim() || 'System';
+          if (name.toLowerCase() === 'system') tab = 'system';
+          
+          let text = decodeHTML(dl.querySelector('dd')?.innerHTML || '');
+          const imgEl = dl.querySelector('img[alt="avatar"]') || dl.querySelector('img');
+          const iconUrl = imgEl ? imgEl.src : null;
+          const fullText = text;
+          
+          let color = dl.style.color;
+          if (!color) {
+            const dt = dl.querySelector('dt');
+            const dd = dl.querySelector('dd');
+            color = dt?.style.color || dd?.style.color || '#fff';
+          }
+          
+          return {
+            tab, name, text, iconUrl, color,
+            isSuccess: /(성공|success|대성공|크리티컬|critical)[\s!?.]*$/i.test(fullText),
+            isFailure: /(실패|failure|펌블|fumble)[\s!?.]*$/i.test(fullText),
+            hasDice: /(\d+[dD]\d+|\[\d+(?:,\s*\d+)*\]|→\s*\d+)/.test(text)
+          };
+        });
+      } else {
+        // Log Format type 2 (paragraph based)
+        logs = Array.from(doc.querySelectorAll('p')).map(p => {
+          let tab = '메인', name = 'System', text = '', color = '#fff';
+          const spans = p.querySelectorAll('span');
+          
+          if (p.style.color) {
+            color = p.style.color;
+          }
+          
+          if (spans.length >= 3) {
+            tab = spans[0].textContent.replace(/[\[\]]/g, '').trim();
+            name = spans[1].textContent.replace(/:$/, '').trim();
+            if (color === '#fff') {
+              color = spans[1].style.color || '#fff';
             }
-            
-            if (spans.length >= 3) {
-              tab = spans[0].textContent.replace(/[\[\]]/g, '').trim();
-              name = spans[1].textContent.replace(/:$/, '').trim();
-              if (color === '#fff') {
-                color = spans[1].style.color || '#fff';
-              }
-              text = decodeHTML(Array.from(spans).slice(2).map(s => s.innerHTML).join('')).replace(/^:/, '').trim();
+            text = decodeHTML(Array.from(spans).slice(2).map(s => s.innerHTML).join('')).replace(/^:/, '').trim();
+          } else {
+            const tabSpan = p.querySelector('span');
+            if (tabSpan && tabSpan.textContent.trim().startsWith('[')) {
+              tab = tabSpan.textContent.replace(/[\[\]]/g, '').trim();
+            }
+            const fullText = decodeHTML(p.innerHTML.replace(/(<([^>]+)>)/gi, ""));
+            const parts = fullText.split(':');
+            if (parts.length > 1) {
+              name = parts[0].replace(/\[.*?\]/, '').trim();
+              text = parts.slice(1).join(':').trim();
             } else {
-              const tabSpan = p.querySelector('span');
-              if (tabSpan && tabSpan.textContent.trim().startsWith('[')) {
-                tab = tabSpan.textContent.replace(/[\[\]]/g, '').trim();
-              }
-              const fullText = decodeHTML(p.innerHTML.replace(/(<([^>]+)>)/gi, ""));
-              const parts = fullText.split(':');
-              if (parts.length > 1) {
-                name = parts[0].replace(/\[.*?\]/, '').trim();
-                text = parts.slice(1).join(':').trim();
-              } else {
-                text = fullText;
-              }
-              if (color === '#fff') {
-                if (spans.length > 1) color = spans[1].style.color;
-                else if (spans.length === 1 && !spans[0].textContent.startsWith('[')) color = spans[0].style.color;
-              }
+              text = fullText;
             }
-
-            tab = normalizeTabName(tab);
-
-            if (!name) name = 'System';
-            if (name === 'System' || name === '시스템') {
-              const match = text.match(/^(.+?)\s*-\s*(판정|선언|Check|Roll)\s+(.*)/);
-              if (match) { name = match[1].trim(); text = match[3].trim(); }
-            }
-            if (name.toLowerCase() === 'system') tab = 'system';
-
-            const imgEl = p.querySelector('img');
-            const iconUrl = imgEl ? imgEl.src : null;
-            const fullText = text;
-            
-            return {
-              tab, name, text, iconUrl, color,
-              isSuccess: /(성공|success|대성공|크리티컬|critical)[\s!?.]*$/i.test(fullText),
-              isFailure: /(실패|failure|펌블|fumble)[\s!?.]*$/i.test(fullText),
-              hasDice: /(\d+[dD]\d+|\[\d+(?:,\s*\d+)*\]|→\s*\d+)/.test(text)
-            };
-          });
-        }
-
-        state.parsedLogs = logs.filter(log => log.text && log.text.trim() !== '');
-        
-        // Extract Unique tabs
-        const tabSet = new Set();
-        state.parsedLogs.forEach(log => {
-          if (log.tab && log.tab !== 'system') tabSet.add(log.tab);
-        });
-        state.uniqueTabs = Array.from(tabSet);
-        
-        // Extract Unique characters
-        const charSet = new Set();
-        state.parsedLogs.forEach(log => {
-          if (log.name && log.name.toLowerCase() !== 'system') {
-            charSet.add(log.name);
-          }
-        });
-        state.uniqueCharacters = Array.from(charSet);
-        
-        // Auto-populate parsed colors from log to state.charSettings if not already defined
-        state.uniqueCharacters.forEach(name => {
-          if (!state.charSettings[name]) {
-            state.charSettings[name] = {};
-          }
-          if (!state.charSettings[name].color) {
-            const firstEntry = state.parsedLogs.find(log => log.name === name);
-            if (firstEntry && firstEntry.color) {
-              const parsedHex = colorToHex(firstEntry.color);
-              if (parsedHex && parsedHex.toLowerCase() !== '#ffffff') {
-                state.charSettings[name].color = parsedHex;
-              }
+            if (color === '#fff') {
+              if (spans.length > 1) color = spans[1].style.color;
+              else if (spans.length === 1 && !spans[0].textContent.startsWith('[')) color = spans[0].style.color;
             }
           }
+
+          tab = normalizeTabName(tab);
+
+          if (!name) name = 'System';
+          if (name === 'System' || name === '시스템') {
+            const match = text.match(/^(.+?)\s*-\s*(판정|선언|Check|Roll)\s+(.*)/);
+            if (match) { name = match[1].trim(); text = match[3].trim(); }
+          }
+          if (name.toLowerCase() === 'system') tab = 'system';
+
+          const imgEl = p.querySelector('img');
+          const iconUrl = imgEl ? imgEl.src : null;
+          const fullText = text;
+          
+          return {
+            tab, name, text, iconUrl, color,
+            isSuccess: /(성공|success|대성공|크리티컬|critical)[\s!?.]*$/i.test(fullText),
+            isFailure: /(실패|failure|펌블|fumble)[\s!?.]*$/i.test(fullText),
+            hasDice: /(\d+[dD]\d+|\[\d+(?:,\s*\d+)*\]|→\s*\d+)/.test(text)
+          };
         });
-        saveSettings();
-        
-        renderTabColorList();
-        renderCharSettingsList();
-        renderNarratorList();
-        
-        updateStatus('변환 완료', 'active');
-        renderPreview();
-        
+      }
+
+      setLoadedLogs(logs, fileName, 'file');
     } catch (err) {
       alert("로그 파일 분석 중 에러가 발생했습니다.");
       console.error(err);
