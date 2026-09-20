@@ -46,6 +46,11 @@
     
     try {
       state.charSettings = JSON.parse(localStorage.getItem(CONFIG_KEYS.charSettings)) || {};
+      for (const name in state.charSettings) {
+        if (state.charSettings[name].avatar && !state.charSettings[name]._manual) {
+          delete state.charSettings[name].avatar;
+        }
+      }
     } catch(e) { state.charSettings = {}; }
     
     try {
@@ -855,7 +860,8 @@
         }
         state.charSettings[name] = {
           color: colorPicker.value,
-          avatar: avatarVal
+          avatar: avatarVal,
+          _manual: !!avatarVal
         };
         saveSettings();
         renderPreview();
@@ -1031,15 +1037,20 @@
     });
     state.uniqueCharacters = Array.from(charSet);
 
-    // Auto-populate parsed colors and avatars to state.charSettings if not already defined
+    // Auto-populate parsed colors to state.charSettings if not already defined (matches cocoroke)
     state.uniqueCharacters.forEach(name => {
       if (!state.charSettings[name]) {
         state.charSettings[name] = {};
       }
       
+      // Clean up any stale auto-populated avatar from localStorage so per-chat images are not blocked
+      if (state.charSettings[name].avatar && !state.charSettings[name]._manual) {
+        delete state.charSettings[name].avatar;
+      }
+      
       // Auto-set color
       if (!state.charSettings[name].color) {
-        if (charactersMap[name] && charactersMap[name].color) {
+        if (charactersMap && charactersMap[name] && charactersMap[name].color) {
           state.charSettings[name].color = colorToHex(charactersMap[name].color);
         } else {
           const firstEntry = state.parsedLogs.find(log => log.name === name);
@@ -1049,13 +1060,6 @@
               state.charSettings[name].color = parsedHex;
             }
           }
-        }
-      }
-
-      // Auto-set avatar image URL only as fallback if character has a default room icon
-      if (!state.charSettings[name].avatar) {
-        if (charactersMap[name] && charactersMap[name].iconUrl) {
-          state.charSettings[name].avatar = charactersMap[name].iconUrl;
         }
       }
     });
@@ -1288,12 +1292,8 @@
       })();
 
       let color = fields.color?.stringValue || (charactersMap[name] && charactersMap[name].color) || '#ffffff';
-      // Individual chat message's icon (selected standing for this chat)
+      // Individual chat message's icon (selected standing for this chat) - exact cocoroke extraction
       let iconUrl = fields.iconUrl?.stringValue || fields.avatarUrl?.stringValue || null;
-      // Fallback to room character default only if chat has no icon
-      if (!iconUrl && charactersMap[name] && charactersMap[name].iconUrl) {
-        iconUrl = charactersMap[name].iconUrl;
-      }
       const createdAt = fields.createdAt?.timestampValue || doc.createTime || new Date().toISOString();
 
       return {
@@ -2372,9 +2372,13 @@
         let nameColor = charOverride.color || log.color || 'inherit';
         if (nameColor !== 'inherit') nameColor = colorToHex(nameColor);
         
-        // Per-chat icon takes priority unless user manually typed an explicit override in sidebar
-        const customAvatar = (charOverride.avatar && charOverride.avatar.trim()) ? charOverride.avatar.trim() : null;
-        const avatarUrl = customAvatar || log.iconUrl || null;
+        // Match cocoroke: Each chat message uses its own iconUrl (per-chat expression/standing)
+        let avatarUrl = log.iconUrl || null;
+        if (charOverride._manual && charOverride.avatar) {
+          avatarUrl = charOverride.avatar.trim();
+        } else if (!avatarUrl && charOverride.avatar) {
+          avatarUrl = charOverride.avatar.trim();
+        }
 
         // Check if this speaker should be formatted as a Narrator (only in the Main tab)
         const isMainTab = tab === '메인' || (tab && tab.toLowerCase() === 'main');
