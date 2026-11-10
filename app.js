@@ -122,11 +122,23 @@
   ];
 
   // Helper to escape HTML characters
+  const ESC_RE = /[&<>\u00a0]/g;
+  const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\u00a0': '&nbsp;' };
   function escapeHtml(text) {
     if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return String(text).replace(ESC_RE, c => ESC_MAP[c]);
+  }
+
+  function minifyCSS(css) {
+    return css.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s+/g, ' ').replace(/\s*([{};])\s*/g, '$1').trim();
+  }
+
+  // For attribute values (src/href/value): additionally escapes quotes so a URL can't break out of the attribute.
+  const ESC_ATTR_RE = /[&<>"'\u00a0]/g;
+  const ESC_ATTR_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '\u00a0': '&nbsp;' };
+  function escapeAttr(text) {
+    if (!text) return '';
+    return String(text).replace(ESC_ATTR_RE, c => ESC_ATTR_MAP[c]);
   }
 
   // Helper to normalize tab names to standard names
@@ -849,7 +861,7 @@
             <button class="list-item-btn char-reset-btn" style="font-size: 11px;">초기화</button>
           </div>
         </div>
-        <input type="text" class="input-text char-avatar-input" style="font-size: 11px; padding: 6px 8px; width: 100%; box-sizing: border-box;" placeholder="프로필 이미지 URL (http...)" value="${escapeHtml(savedAvatar)}">
+        <input type="text" class="input-text char-avatar-input" style="font-size: 11px; padding: 6px 8px; width: 100%; box-sizing: border-box;" placeholder="프로필 이미지 URL (http...)" value="${escapeAttr(savedAvatar)}">
       `;
       
       const colorPicker = item.querySelector('.char-color-picker');
@@ -1167,7 +1179,7 @@
     let pageToken = '';
     
     while (true) {
-      const apiUrl = `https://firestore.googleapis.com/v1/projects/ccfolia-160aa/databases/(default)/documents/rooms/${roomId}/messages?pageSize=300${pageToken ? '&pageToken=' + pageToken : ''}`;
+      const apiUrl = `https://firestore.googleapis.com/v1/projects/ccfolia-160aa/databases/(default)/documents/rooms/${roomId}/messages?pageSize=300${pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : ''}`;
       const res = await fetch(apiUrl, { headers });
       
       if (!res.ok) {
@@ -1179,9 +1191,10 @@
       
       const data = await res.json();
       if (data.documents && data.documents.length > 0) {
-        allMessages = allMessages.concat(data.documents);
-        showToast(`메시지 로딩 중... (${allMessages.length.toLocaleString()}개)`);
-        updateStatus(`로딩 중 (${allMessages.length.toLocaleString()}개)`, 'editing');
+        for (const d of data.documents) allMessages.push(d);
+        const loadedLabel = allMessages.length.toLocaleString();
+        showToast(`메시지 로딩 중... (${loadedLabel}개)`);
+        updateStatus(`로딩 중 (${loadedLabel}개)`, 'editing');
       }
       
       if (data.nextPageToken) {
@@ -1379,7 +1392,17 @@
   }
 
   // --- PREVIEW RENDERING & SYNCHRONIZATION ---
+  // Public entry point: any number of calls within one frame result in a single render.
+  let previewRaf = 0;
   function renderPreview() {
+    if (previewRaf) return;
+    previewRaf = requestAnimationFrame(() => {
+      previewRaf = 0;
+      renderPreviewNow();
+    });
+  }
+
+  function renderPreviewNow() {
     if (state.parsedLogs.length === 0) return;
     
     const isEditing = !state.rangeSelectMode;
@@ -1393,28 +1416,23 @@
       state.tabColors, 
       state.narrators, 
       state.fontSetting,
-      isEditing
+      isEditing,
+      true
     );
     
     const frame = document.getElementById('previewFrame');
     const doc = frame.contentDocument || frame.contentWindow.document;
-    
+
     doc.open();
     doc.write(htmlContent);
     doc.close();
 
-    // Set up event delegation inside the preview iframe
+    // The iframe document is fully written at this point, so no timers are needed.
     if (isEditing) {
-      setTimeout(() => {
-        setupIframeEventDelegation();
-      }, 50);
+      setupIframeEventDelegation();
     }
-
-    // Check if Range Select Mode should be applied
     if (state.rangeSelectMode) {
-      setTimeout(() => {
-        enableRangeSelection(true);
-      }, 50);
+      enableRangeSelection(true);
     }
   }
 
@@ -1451,7 +1469,8 @@
       e.preventDefault();
       e.stopPropagation();
 
-      const idx = parseInt(btn.dataset.idx);
+      const ownerEntry = btn.closest('.log-entry');
+      const idx = ownerEntry ? parseInt(ownerEntry.dataset.idx) : NaN;
       if (isNaN(idx)) return;
 
       if (btn.classList.contains('btn-delete')) {
@@ -1478,6 +1497,15 @@
         }
       }
     };
+
+    // 1b. A single shared toolbar follows the hovered entry (instead of 5 buttons per entry)
+    const toolbar = doc.getElementById('edit-toolbar');
+    if (toolbar) {
+      container.onmouseover = (e) => {
+        const entry = e.target.closest && e.target.closest('.log-entry');
+        if (entry && toolbar.parentNode !== entry) entry.appendChild(toolbar);
+      };
+    }
 
     // 2. Input/Blur events delegation for contenteditable sync
     container.oninput = (e) => {
@@ -1714,7 +1742,275 @@
   }
 
   // --- HTML CODE GENERATION ENGINE ---
-  function generateHTMLCode(parsedLogs, theme = 'default', showIcons = false, blogHeader = false, charSettings = {}, tabColors = {}, narrators = [], fontSetting = null, isEditing = false) {
+  // ---------------------------------------------------------------------------
+  // Themes: each theme is plain data; buildThemeCSS() turns it into the CSS rules.
+  //   wrap = [wrapper background, text colour, font-family, line-height]
+  //   after = optional extra rules inserted right after the named slot
+  // To add a theme, add one entry here and one <option> in the theme dropdown.
+  // ---------------------------------------------------------------------------
+  const FLAT = 'background: transparent; border: none;';
+  const F_KR = "'Malgun Gothic', sans-serif";
+  const F_KR_APPLE = "'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif";
+  const F_MONO = "'Consolas', 'Courier New', monospace";
+  const THEME_DEFS = {
+    default: {
+      vars: '--dice-success: #4ade80; --dice-fail: #ff6b6b; --dice-info: #a8b3ff; --accent-color: #e74c3c;',
+      body: '#1e1e1e',
+      wrap: ['#1e1e1e', '#eee', F_KR, '1.4'],
+      btn: 'background: #2a2a2a; color: #ccc; border-color: #555;',
+      btnHover: '#3a3a3a',
+      group: 'background: #252525;',
+      main: 'background: transparent;',
+      info: 'margin: 3px 0; background: #3A3F52;',
+      bgm: 'background: #3A3F52; color: #eee; border-color: rgba(255,255,255,0.15);',
+      other: 'background: #4a4a4a;',
+      otherText: '#aaaaaa',
+      custom: 'border-left: 2px solid var(--tab-color, #888);',
+      badge: 'background: rgba(0,0,0,0.5); color: #fff;',
+      sep: 'background: rgba(255,255,255,0.1);',
+    },
+    light: {
+      vars: '--dice-success: #27ae60; --dice-fail: #c0392b; --dice-info: #2980b9; --accent-color: #2980b9; --edit-btn-bg: rgba(255, 255, 255, 0.9); --edit-btn-color: #555;',
+      body: '#f5f6fa',
+      wrap: ['#f5f6fa', '#2c3e50', F_KR_APPLE, '1.4'],
+      btn: 'background: #dde3ed; color: #2c3e50; border-color: #bbc3d0;',
+      btnHover: '#c8d0de',
+      group: 'background: #ffffff; border: 1px solid #dcdde1; box-shadow: 0 2px 4px rgba(0,0,0,0.05);',
+      main: 'background: transparent; border: none; box-shadow: none;',
+      info: 'margin: 3px 0; background: #f0f8ff; border-color: #bce0fd;',
+      bgm: 'background: #f0f8ff; color: #2c3e50; border-color: #bce0fd;',
+      other: 'background: #e0e0e0; border-color: #ccc;',
+      otherText: '#555',
+      custom: 'border-left: 4px solid var(--tab-color, #888);',
+      badge: 'background: var(--tab-color, #eee); color: #fff; text-shadow: 0 1px 1px rgba(0,0,0,0.3);',
+      sep: 'background: #eaeff2;',
+    },
+    blackred: {
+      vars: '--dice-success: #ff6666; --dice-fail: #cc4444; --dice-info: #ff9999; --accent-color: #880000;',
+      body: '#0d0d0d',
+      wrap: ['#0d0d0d', '#cccccc', F_KR, '1.4'],
+      btn: 'background: #1a1a1a; color: #cc3333; border-color: #880000;',
+      btnHover: '#2a1010',
+      group: 'background: #181818; border: 1px solid #880000;',
+      main: FLAT,
+      info: 'margin: 3px 0; background: #880000; border-color: #880000; color: #f5c0c0;',
+      bgm: 'background: #880000; color: #f5c0c0; border-color: #600000;',
+      other: 'background: #2a2a2a; border-color: #600000;',
+      otherText: '#999999',
+      custom: 'border-left: 2px solid var(--tab-color, #880000);',
+      badge: 'background: #880000; color: #ffd0d0; border: 1px solid #600000;',
+      sep: 'background: #880000; opacity: 0.4;',
+    },
+    darkgreen: {
+      vars: '--dice-success: #2ecc71; --dice-fail: #e74c3c; --dice-info: #81c784; --accent-color: #2e7d32;',
+      body: '#0a1910',
+      wrap: ['#0a1910', '#c8e6c9', F_KR, '1.4'],
+      btn: 'background: #0a1f10; color: #c8e6c9; border-color: #2e7d32;',
+      btnHover: '#143623',
+      group: 'background: #0f291a; border: 1px solid #1b5e20;',
+      main: FLAT,
+      info: 'margin: 3px 0; background: #143623; border-color: #2e7d32;',
+      bgm: 'background: #143623; color: #c8e6c9; border-color: #2e7d32;',
+      other: 'background: #111; border-color: #1b5e20;',
+      otherText: '#617b57',
+      custom: 'border-left: 2px solid var(--tab-color, #2ecc71);',
+      badge: 'background: var(--tab-color, #1b5e20); color: #c8e6c9; border: 1px solid #2e7d32;',
+      sep: 'background: #1b5e20;',
+    },
+    darkblue: {
+      vars: '--dice-success: #4fc3f7; --dice-fail: #e74c3c; --dice-info: #81b4e6; --accent-color: #1565c0;',
+      body: '#0a1019',
+      wrap: ['#0a1019', '#bbdefb', F_KR, '1.4'],
+      btn: 'background: #0a1428; color: #bbdefb; border-color: #1565c0;',
+      btnHover: '#141e36',
+      group: 'background: #0f1d2e; border: 1px solid #1565c0;',
+      main: FLAT,
+      info: 'margin: 3px 0; background: #003169; border-color: #003169;',
+      bgm: 'background: #003169; color: #bbdefb; border-color: #003169;',
+      other: 'background: #111; border-color: #1565c0;',
+      otherText: '#58749f',
+      custom: 'border-left: 2px solid var(--tab-color, #4fc3f7);',
+      badge: 'background: #1565c0; color: #bbdefb; border: 1px solid #1e88e5;',
+      sep: 'background: #1565c0; opacity: 0.5;',
+    },
+    sf: {
+      vars: '--dice-success: #00ff66; --dice-fail: #ff3300; --dice-info: #00ffff; --accent-color: #00ffff;',
+      body: '#050510',
+      wrap: ['#050510', '#00ffff', F_MONO, '1.4'],
+      btn: 'background: #001a1a; color: #00ffff; border-color: #00ffff; border-radius: 0; box-shadow: 0 0 8px rgba(0,255,255,0.3);',
+      btnHover: '#003333',
+      group: 'background: #080820; border: 1px solid #00ffff; border-radius: 0;',
+      main: 'background: transparent; border: none; border-left: 2px solid rgba(0,255,255,0.5); padding-left: 10px; margin-left: 5px;',
+      info: 'margin: 3px 0; background: #001a1a; border-color: #00ff66; color: #00ff66;',
+      bgm: 'background: #001a1a; color: #00ff66; border-color: #00ff66;',
+      other: 'background: #0d0d18; border-color: #334455; color: #7799aa;',
+      otherText: '#7799aa',
+      custom: 'border-left: 2px solid var(--tab-color, #00ffff);',
+      badge: 'background: var(--tab-color, #00ffff); color: #000; border-radius: 0;',
+      sep: 'background: rgba(0,255,255,0.2);',
+    },
+    transdark: {
+      vars: '--dice-success: #4ade80; --dice-fail: #ff6b6b; --dice-info: #a8b3ff; --accent-color: #a8b3ff;',
+      body: '#1e1e1e',
+      wrap: ['transparent', '#eee', F_KR, '1.4'],
+      btn: 'background: rgba(40,40,40,0.7); color: #eee; border-color: rgba(255,255,255,0.2); backdrop-filter: blur(4px);',
+      btnHover: 'rgba(60,60,60,0.8)',
+      group: 'background: rgba(37, 37, 37, 0.5);',
+      main: 'background: transparent;',
+      info: 'margin: 3px 0; background: rgba(58, 63, 82, 0.5);',
+      bgm: 'background: rgba(58, 63, 82, 0.5); color: #eee; border-color: rgba(255,255,255,0.15);',
+      other: 'background: rgba(74, 74, 74, 0.5);',
+      otherText: '#aaaaaa',
+      custom: 'border-left: 2px solid var(--tab-color, #888);',
+      badge: 'background: rgba(0,0,0,0.5); color: #fff;',
+      sep: 'background: rgba(255,255,255,0.1);',
+    },
+    translight: {
+      vars: '--dice-success: #27ae60; --dice-fail: #c0392b; --dice-info: #2980b9; --accent-color: #2980b9; --edit-btn-bg: rgba(255, 255, 255, 0.9); --edit-btn-color: #555;',
+      body: '#f5f6fa',
+      wrap: ['transparent', '#2c3e50', F_KR_APPLE, '1.4'],
+      btn: 'background: rgba(220,225,235,0.75); color: #2c3e50; border-color: rgba(150,160,180,0.5); backdrop-filter: blur(4px);',
+      btnHover: 'rgba(200,208,220,0.85)',
+      group: 'background: rgba(255, 255, 255, 0.5); border: 1px solid rgba(220, 221, 225, 0.5);',
+      main: FLAT,
+      info: 'margin: 3px 0; background: rgba(240, 248, 255, 0.5); border-color: rgba(188, 224, 253, 0.5);',
+      bgm: 'background: rgba(240, 248, 255, 0.5); color: #2c3e50; border-color: rgba(188,224,253,0.5);',
+      other: 'background: rgba(224, 224, 224, 0.5); border-color: rgba(204, 204, 204, 0.5);',
+      otherText: '#555',
+      custom: 'border-left: 4px solid var(--tab-color, #888);',
+      badge: 'background: var(--tab-color, #eee); color: #fff;',
+      sep: 'background: rgba(234, 239, 242, 0.5);',
+    },
+    wedding: {
+      vars: '--dice-success: #c0392b; --dice-fail: #8e5ea2; --dice-info: #2471a3; --accent-color: #BF4646; --edit-btn-bg: rgba(255, 255, 255, 0.9); --edit-btn-color: #555;',
+      body: '#FFF4EA',
+      wrap: ['#FFF4EA', '#4a2c2c', '\'Malgun Gothic\', \'Apple SD Gothic Neo\', Georgia, serif', '1.4'],
+      btn: 'background: #BF4646; color: #fff5f5; border-color: #8a2020; box-shadow: 0 2px 6px rgba(100,0,0,0.25);',
+      btnHover: '#a33a3a',
+      group: 'background: #fff8f2; border: 1px solid #e8d5c4;',
+      main: FLAT,
+      info: 'margin: 3px 0; background: #BF4646; border-color: #BF4646; color: #fff5f5;',
+      bgm: 'background: #BF4646; color: #fff5f5; border-color: #8a2020;',
+      other: 'background: #7EACB5; border-color: #6096a0; color: #fff;',
+      otherText: '#f0f8fa',
+      custom: 'border-left: 4px solid var(--tab-color, #BF4646);',
+      badge: 'background: var(--tab-color, #BF4646); color: #fff;',
+      sep: 'background: #e8d5c4;',
+      after: {
+        bgm: '.log-group.tab-info .text-col { color: #fff5f5 !important; }',
+      },
+    },
+    void: {
+      vars: '--dice-success: #1a6fd4; --dice-fail: #e74c3c; --dice-info: #f85b23; --accent-color: #2f5d70;',
+      body: '#e6dd00',
+      wrap: ['#e6dd00', '#2f5d70', F_KR_APPLE, '1.4'],
+      btn: 'background: #2f5d70; color: #e6dd00; border-color: #1d3d4d;',
+      btnHover: '#1d3d4d',
+      group: 'background: #d4cc00; border: 1px solid #b8b000; border-radius: 0 !important;',
+      main: 'background: transparent; border: none; border-radius: 0 !important;',
+      info: 'margin: 3px 0; background: #f85b23; border-color: #f85b23; color: #fff; border-radius: 0 !important; clip-path: polygon(14px 0%, 100% 0%, 100% 100%, 0% 100%, 0% 14px);',
+      bgm: 'background: #2f5d70; color: #ffff00; border-color: #1d3d4d;',
+      other: 'background: #2f5d70; border-color: #1d3d4d; border-radius: 0 !important;',
+      otherText: '#fff',
+      custom: 'border-left: 4px solid var(--tab-color, #2f5d70); border-radius: 0 !important;',
+      badge: 'background: #2f5d70; color: #e6dd00; border-radius: 0;',
+      sep: 'background: #2f5d70; opacity: 0.3;',
+      after: {
+        main: '.log-group.tab-main .text-col { color: #2f5d70 !important; }',
+        info: '.log-group.tab-info .name-col { color: #e6dd00 !important; } .log-group.tab-info .text-col { color: #fff !important; }',
+      },
+    },
+    suibokuga: {
+      vars: '--dice-success: #4a7c4a; --dice-fail: #8b3a3a; --dice-info: #555; --accent-color: #333; --edit-btn-bg: rgba(255, 255, 255, 0.9); --edit-btn-color: #555;',
+      body: '#f7f4ef',
+      wrap: ['#f7f4ef', '#1a1a1a', '\'Noto Serif JP\', \'Yu Mincho\', serif', '1.8'],
+      btn: 'background: #e8e0d5; color: #333; border-color: #b0a898;',
+      btnHover: '#ddd5c8',
+      group: 'background: #ede8e0; border: 1px solid #c8bfb0;',
+      main: FLAT,
+      info: 'margin: 3px 0; background: #e8e0d5; border-color: #8a7a6a;',
+      bgm: 'background: #e8e0d5; color: #333; border-color: #8a7a6a;',
+      other: 'background: #ede8e0; border-color: #b0a898;',
+      otherText: '#888',
+      custom: 'border-left: 3px solid var(--tab-color, #4a7c4a);',
+      badge: 'background: var(--tab-color, #555); color: #f7f4ef;',
+      sep: 'background: #8a7a6a; opacity: 0.35;',
+    },
+    terminal: {
+      vars: '--dice-success: #00ff41; --dice-fail: #ff4444; --dice-info: #00cc33; --accent-color: #00ff41;',
+      body: '#0d0d0d',
+      wrap: ['#0d0d0d', '#00ff41', F_MONO, '1.6'],
+      btn: 'background: #0a1a0a; color: #00ff41; border-color: #00aa2a; border-radius: 0;',
+      btnHover: '#0d2a0d',
+      group: 'background: #0a140a; border: 1px solid #00aa2a; border-radius: 0 !important;',
+      main: FLAT,
+      info: 'margin: 3px 0; background: #0a2a0a; border-color: #00ff41; border-radius: 0 !important;',
+      bgm: 'background: #0a2a0a; color: #00ff41; border-color: #00ff41;',
+      other: 'background: #111; border-color: #005a15; border-radius: 0 !important;',
+      otherText: '#007a1f',
+      custom: 'border-left: 2px solid var(--tab-color, #00ff41); border-radius: 0 !important;',
+      badge: 'background: var(--tab-color, #00aa2a); color: #0d0d0d; border-radius: 0; font-family: monospace;',
+      sep: 'background: #00aa2a; opacity: 0.4;',
+      after: {
+        badge: '.name-col { color: #00cc33 !important; }',
+      },
+    },
+    pink: {
+      vars: '--dice-success: #e91e8c; --dice-fail: #c2185b; --dice-info: #f06292; --accent-color: #e91e8c;',
+      body: '#fff0f5',
+      wrap: ['#fff0f5', '#4a1535', F_KR, '1.5'],
+      btn: 'background: #ffd6e7; color: #880e4f; border-color: #f48fb1;',
+      btnHover: '#ffb6c1',
+      group: 'background: #ffe4ec; border: 1px solid #f8bbd0;',
+      main: FLAT,
+      info: 'margin: 3px 0; background: #ffb6c1; border-color: #f48fb1;',
+      bgm: 'background: #ffb6c1; color: #880e4f; border-color: #f48fb1;',
+      other: 'background: #ffe4ec; border-color: #f8bbd0;',
+      otherText: '#c77a9a',
+      custom: 'border-left: 2px solid var(--tab-color, #e91e8c);',
+      badge: 'background: var(--tab-color, #e91e8c); color: #fff;',
+      sep: 'background: #f48fb1; opacity: 0.6;',
+    },
+    pastel: {
+      vars: '--dice-success: #6a9f6a; --dice-fail: #c97b84; --dice-info: #7a9fc9; --accent-color: #9b7ec9;',
+      body: '#f9f5ff',
+      wrap: ['#f9f5ff', '#3a2d4a', F_KR, '1.5'],
+      btn: 'background: #ede0ff; color: #5a3d7a; border-color: #c9a8f0;',
+      btnHover: '#e0ccff',
+      group: 'background: #f0e8ff; border: 1px solid #dcc8f5;',
+      main: FLAT,
+      info: 'margin: 3px 0; background: #e8d5fb; border-color: #c9a8f0;',
+      bgm: 'background: #e8d5fb; color: #5a3d7a; border-color: #c9a8f0;',
+      other: 'background: #eef5ff; border-color: #c8ddf5;',
+      otherText: '#8a9abf',
+      custom: 'border-left: 2px solid var(--tab-color, #9b7ec9);',
+      badge: 'background: var(--tab-color, #9b7ec9); color: #fff;',
+      sep: 'background: #c9a8f0; opacity: 0.5;',
+    },
+  };
+
+  function buildThemeCSS(name) {
+    const t = Object.prototype.hasOwnProperty.call(THEME_DEFS, name) ? THEME_DEFS[name] : THEME_DEFS.default;
+    const af = (k) => (t.after && t.after[k]) ? ' ' + t.after[k] : '';
+    return [
+      `:root { ${t.vars} }`,
+      `body { background-color: ${t.body}; }`,
+      `.ccfolia-log-wrapper { background: ${t.wrap[0]}; color: ${t.wrap[1]}; padding: 40px; font-family: ${t.wrap[2]}; line-height: ${t.wrap[3]}; }`,
+      `.tab-filter-btn { ${t.btn} }`,
+      `.tab-filter-btn:hover { background: ${t.btnHover}; }`,
+      `.log-group { ${t.group} }`,
+      `.log-group.tab-main { ${t.main} }` + af('main'),
+      `.log-group.tab-info { ${t.info} }` + af('info'),
+      `.bgm-summary.tab-info { ${t.bgm} }` + af('bgm'),
+      `.log-group.tab-other { ${t.other} }`,
+      `.log-group.tab-other .text-col { color: ${t.otherText} !important; }`,
+      `.log-group.tab-custom { ${t.custom} }`,
+      `.tab-badge { ${t.badge} }` + af('badge'),
+      `.log-sep, .log-sep-outer { ${t.sep} }`,
+    ].join('\n');
+  }
+
+  function generateHTMLCode(parsedLogs, theme = 'default', showIcons = false, blogHeader = false, charSettings = {}, tabColors = {}, narrators = [], fontSetting = null, isEditing = false, withIdx = false) {
     const uniqueTabs = [];
     parsedLogs.forEach(log => {
       const t = log.tab || '메인';
@@ -1788,7 +2084,7 @@
         .log-group.tab-other { margin-left: 20px !important; }
         .log-sep { margin: 5px 15px !important; }
         .log-sep-outer { margin: 5px 15px !important; }
-        .avatar-img[style*="visibility:hidden"] { display: none !important; }
+        .avatar-img.avh { display: none !important; }
         .log-entry { flex-direction: column; align-items: flex-start; gap: 3px; }
         .name-col { width: auto !important; font-size: 13px !important; flex-direction: row; padding-top: 0; opacity: 0.75; padding-left: 10px; }
         .name-col:empty { display: none; }
@@ -1822,6 +2118,10 @@
       .tab-filter-label { display: flex; align-items: center; margin-bottom: 8px; font-size: 13px; color: #eee; cursor: pointer; user-select: none; transition: color 0.2s; }
       .custom-chk { width: 14px; height: 14px; border-radius: 3px; border: 2px solid #555; margin-right: 8px; transition: background 0.2s, border-color 0.2s; }
 
+    `;
+
+    // Edit-mode styles are only needed in the live editing preview, never in exported files.
+    const editCSS = isEditing ? `
       /* Edit Mode Styles */
       :root {
         --edit-btn-bg: rgba(30, 30, 30, 0.9);
@@ -1912,255 +2212,10 @@
         padding: 2px 4px;
         border-radius: 4px;
       }
-      
-    `;
+      body.is-editing .log-container > .edit-controls-wrapper { display: none; }
+    ` : '';
 
-    let themeCSS = '';
-    if (theme === 'light') {
-      themeCSS = `
-        :root { --dice-success: #27ae60; --dice-fail: #c0392b; --dice-info: #2980b9; --accent-color: #2980b9; --edit-btn-bg: rgba(255, 255, 255, 0.9); --edit-btn-color: #555; }
-        body { background-color: #f5f6fa; }
-        .ccfolia-log-wrapper { background: #f5f6fa; color: #2c3e50; padding: 40px; font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; line-height: 1.4; }
-        .tab-filter-btn { background: #dde3ed; color: #2c3e50; border-color: #bbc3d0; }
-        .tab-filter-btn:hover { background: #c8d0de; }
-        .log-group { background: #ffffff; border: 1px solid #dcdde1; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        .log-group.tab-main { background: transparent; border: none; box-shadow: none; }
-        .log-group.tab-info { margin: 3px 0; background: #f0f8ff; border-color: #bce0fd; }
-        .bgm-summary.tab-info { background: #f0f8ff; color: #2c3e50; border-color: #bce0fd; }
-        .log-group.tab-other { background: #e0e0e0; border-color: #ccc; }
-        .log-group.tab-other .text-col { color: #555 !important; }
-        .log-group.tab-custom { border-left: 4px solid var(--tab-color, #888); }
-        .tab-badge { background: var(--tab-color, #eee); color: #fff; text-shadow: 0 1px 1px rgba(0,0,0,0.3); }
-        .log-sep, .log-sep-outer { background: #eaeff2; }
-      `;
-    } else if (theme === 'blackred') {
-      themeCSS = `
-        :root { --dice-success: #ff6666; --dice-fail: #cc4444; --dice-info: #ff9999; --accent-color: #880000; }
-        body { background-color: #0d0d0d; }
-        .ccfolia-log-wrapper { background: #0d0d0d; color: #cccccc; padding: 40px; font-family: 'Malgun Gothic', sans-serif; line-height: 1.4; }
-        .tab-filter-btn { background: #1a1a1a; color: #cc3333; border-color: #880000; }
-        .tab-filter-btn:hover { background: #2a1010; }
-        .log-group { background: #181818; border: 1px solid #880000; }
-        .log-group.tab-main { background: transparent; border: none; }
-        .log-group.tab-info { margin: 3px 0; background: #880000; border-color: #880000; color: #f5c0c0; }
-        .bgm-summary.tab-info { background: #880000; color: #f5c0c0; border-color: #600000; }
-        .log-group.tab-other { background: #2a2a2a; border-color: #600000; }
-        .log-group.tab-other .text-col { color: #999999 !important; }
-        .log-group.tab-custom { border-left: 2px solid var(--tab-color, #880000); }
-        .tab-badge { background: #880000; color: #ffd0d0; border: 1px solid #600000; }
-        .log-sep, .log-sep-outer { background: #880000; opacity: 0.4; }
-      `;
-    } else if (theme === 'darkgreen') {
-      themeCSS = `
-        :root { --dice-success: #2ecc71; --dice-fail: #e74c3c; --dice-info: #81c784; --accent-color: #2e7d32; }
-        body { background-color: #0a1910; }
-        .ccfolia-log-wrapper { background: #0a1910; color: #c8e6c9; padding: 40px; font-family: 'Malgun Gothic', sans-serif; line-height: 1.4; }
-        .tab-filter-btn { background: #0a1f10; color: #c8e6c9; border-color: #2e7d32; }
-        .tab-filter-btn:hover { background: #143623; }
-        .log-group { background: #0f291a; border: 1px solid #1b5e20; }
-        .log-group.tab-main { background: transparent; border: none; }
-        .log-group.tab-info { margin: 3px 0; background: #143623; border-color: #2e7d32; }
-        .bgm-summary.tab-info { background: #143623; color: #c8e6c9; border-color: #2e7d32; }
-        .log-group.tab-other { background: #111; border-color: #1b5e20; }
-        .log-group.tab-other .text-col { color: #617b57 !important; }
-        .log-group.tab-custom { border-left: 2px solid var(--tab-color, #2ecc71); }
-        .tab-badge { background: var(--tab-color, #1b5e20); color: #c8e6c9; border: 1px solid #2e7d32; }
-        .log-sep, .log-sep-outer { background: #1b5e20; }
-      `;
-    } else if (theme === 'darkblue') {
-      themeCSS = `
-        :root { --dice-success: #4fc3f7; --dice-fail: #e74c3c; --dice-info: #81b4e6; --accent-color: #1565c0; }
-        body { background-color: #0a1019; }
-        .ccfolia-log-wrapper { background: #0a1019; color: #bbdefb; padding: 40px; font-family: 'Malgun Gothic', sans-serif; line-height: 1.4; }
-        .tab-filter-btn { background: #0a1428; color: #bbdefb; border-color: #1565c0; }
-        .tab-filter-btn:hover { background: #141e36; }
-        .log-group { background: #0f1d2e; border: 1px solid #1565c0; }
-        .log-group.tab-main { background: transparent; border: none; }
-        .log-group.tab-info { margin: 3px 0; background: #003169; border-color: #003169; }
-        .bgm-summary.tab-info { background: #003169; color: #bbdefb; border-color: #003169; }
-        .log-group.tab-other { background: #111; border-color: #1565c0; }
-        .log-group.tab-other .text-col { color: #58749f !important; }
-        .log-group.tab-custom { border-left: 2px solid var(--tab-color, #4fc3f7); }
-        .tab-badge { background: #1565c0; color: #bbdefb; border: 1px solid #1e88e5; }
-        .log-sep, .log-sep-outer { background: #1565c0; opacity: 0.5; }
-      `;
-    } else if (theme === 'sf') {
-      themeCSS = `
-        :root { --dice-success: #00ff66; --dice-fail: #ff3300; --dice-info: #00ffff; --accent-color: #00ffff; }
-        body { background-color: #050510; }
-        .ccfolia-log-wrapper { background: #050510; color: #00ffff; padding: 40px; font-family: 'Consolas', 'Courier New', monospace; line-height: 1.4; }
-        .tab-filter-btn { background: #001a1a; color: #00ffff; border-color: #00ffff; border-radius: 0; box-shadow: 0 0 8px rgba(0,255,255,0.3); }
-        .tab-filter-btn:hover { background: #003333; }
-        .log-group { background: #080820; border: 1px solid #00ffff; border-radius: 0; }
-        .log-group.tab-main { background: transparent; border: none; border-left: 2px solid rgba(0,255,255,0.5); padding-left: 10px; margin-left: 5px; }
-        .log-group.tab-info { margin: 3px 0; background: #001a1a; border-color: #00ff66; color: #00ff66; }
-        .bgm-summary.tab-info { background: #001a1a; color: #00ff66; border-color: #00ff66; }
-        .log-group.tab-other { background: #0d0d18; border-color: #334455; color: #7799aa; }
-        .log-group.tab-other .text-col { color: #7799aa !important; }
-        .log-group.tab-custom { border-left: 2px solid var(--tab-color, #00ffff); }
-        .tab-badge { background: var(--tab-color, #00ffff); color: #000; border-radius: 0; }
-        .log-sep, .log-sep-outer { background: rgba(0,255,255,0.2); }
-      `;
-    } else if (theme === 'transdark') {
-      themeCSS = `
-        :root { --dice-success: #4ade80; --dice-fail: #ff6b6b; --dice-info: #a8b3ff; --accent-color: #a8b3ff; }
-        body { background-color: #1e1e1e; }
-        .ccfolia-log-wrapper { background: transparent; color: #eee; padding: 40px; font-family: 'Malgun Gothic', sans-serif; line-height: 1.4; }
-        .tab-filter-btn { background: rgba(40,40,40,0.7); color: #eee; border-color: rgba(255,255,255,0.2); backdrop-filter: blur(4px); }
-        .tab-filter-btn:hover { background: rgba(60,60,60,0.8); }
-        .log-group { background: rgba(37, 37, 37, 0.5); }
-        .log-group.tab-main { background: transparent; }
-        .log-group.tab-info { margin: 3px 0; background: rgba(58, 63, 82, 0.5); }
-        .bgm-summary.tab-info { background: rgba(58, 63, 82, 0.5); color: #eee; border-color: rgba(255,255,255,0.15); }
-        .log-group.tab-other { background: rgba(74, 74, 74, 0.5); }
-        .log-group.tab-other .text-col { color: #aaaaaa !important; }
-        .log-group.tab-custom { border-left: 2px solid var(--tab-color, #888); }
-        .tab-badge { background: rgba(0,0,0,0.5); color: #fff; }
-        .log-sep, .log-sep-outer { background: rgba(255,255,255,0.1); }
-      `;
-    } else if (theme === 'translight') {
-      themeCSS = `
-        :root { --dice-success: #27ae60; --dice-fail: #c0392b; --dice-info: #2980b9; --accent-color: #2980b9; --edit-btn-bg: rgba(255, 255, 255, 0.9); --edit-btn-color: #555; }
-        body { background-color: #f5f6fa; }
-        .ccfolia-log-wrapper { background: transparent; color: #2c3e50; padding: 40px; font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; line-height: 1.4; }
-        .tab-filter-btn { background: rgba(220,225,235,0.75); color: #2c3e50; border-color: rgba(150,160,180,0.5); backdrop-filter: blur(4px); }
-        .tab-filter-btn:hover { background: rgba(200,208,220,0.85); }
-        .log-group { background: rgba(255, 255, 255, 0.5); border: 1px solid rgba(220, 221, 225, 0.5); }
-        .log-group.tab-main { background: transparent; border: none; }
-        .log-group.tab-info { margin: 3px 0; background: rgba(240, 248, 255, 0.5); border-color: rgba(188, 224, 253, 0.5); }
-        .bgm-summary.tab-info { background: rgba(240, 248, 255, 0.5); color: #2c3e50; border-color: rgba(188,224,253,0.5); }
-        .log-group.tab-other { background: rgba(224, 224, 224, 0.5); border-color: rgba(204, 204, 204, 0.5); }
-        .log-group.tab-other .text-col { color: #555 !important; }
-        .log-group.tab-custom { border-left: 4px solid var(--tab-color, #888); }
-        .tab-badge { background: var(--tab-color, #eee); color: #fff; }
-        .log-sep, .log-sep-outer { background: rgba(234, 239, 242, 0.5); }
-      `;
-    } else if (theme === 'wedding') {
-      themeCSS = `
-        :root { --dice-success: #c0392b; --dice-fail: #8e5ea2; --dice-info: #2471a3; --accent-color: #BF4646; --edit-btn-bg: rgba(255, 255, 255, 0.9); --edit-btn-color: #555; }
-        body { background-color: #FFF4EA; }
-        .ccfolia-log-wrapper { background: #FFF4EA; color: #4a2c2c; padding: 40px; font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', Georgia, serif; line-height: 1.4; }
-        .tab-filter-btn { background: #BF4646; color: #fff5f5; border-color: #8a2020; box-shadow: 0 2px 6px rgba(100,0,0,0.25); }
-        .tab-filter-btn:hover { background: #a33a3a; }
-        .log-group { background: #fff8f2; border: 1px solid #e8d5c4; }
-        .log-group.tab-main { background: transparent; border: none; }
-        .log-group.tab-info { margin: 3px 0; background: #BF4646; border-color: #BF4646; color: #fff5f5; }
-        .bgm-summary.tab-info { background: #BF4646; color: #fff5f5; border-color: #8a2020; }
-        .log-group.tab-info .text-col { color: #fff5f5 !important; }
-        .log-group.tab-other { background: #7EACB5; border-color: #6096a0; color: #fff; }
-        .log-group.tab-other .text-col { color: #f0f8fa !important; }
-        .log-group.tab-custom { border-left: 4px solid var(--tab-color, #BF4646); }
-        .tab-badge { background: var(--tab-color, #BF4646); color: #fff; }
-        .log-sep, .log-sep-outer { background: #e8d5c4; }
-      `;
-    } else if (theme === 'void') {
-      themeCSS = `
-        :root { --dice-success: #1a6fd4; --dice-fail: #e74c3c; --dice-info: #f85b23; --accent-color: #2f5d70; }
-        body { background-color: #e6dd00; }
-        .ccfolia-log-wrapper { background: #e6dd00; color: #2f5d70; padding: 40px; font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; line-height: 1.4; }
-        .tab-filter-btn { background: #2f5d70; color: #e6dd00; border-color: #1d3d4d; }
-        .tab-filter-btn:hover { background: #1d3d4d; }
-        .log-group { background: #d4cc00; border: 1px solid #b8b000; border-radius: 0 !important; }
-        .log-group.tab-main { background: transparent; border: none; border-radius: 0 !important; }
-        .log-group.tab-main .text-col { color: #2f5d70 !important; }
-        .log-group.tab-info { margin: 3px 0; background: #f85b23; border-color: #f85b23; color: #fff; border-radius: 0 !important;
-          clip-path: polygon(14px 0%, 100% 0%, 100% 100%, 0% 100%, 0% 14px); }
-        .log-group.tab-info .name-col { color: #e6dd00 !important; }
-        .log-group.tab-info .text-col { color: #fff !important; }
-        .bgm-summary.tab-info { background: #2f5d70; color: #ffff00; border-color: #1d3d4d; }
-        .log-group.tab-other { background: #2f5d70; border-color: #1d3d4d; border-radius: 0 !important; }
-        .log-group.tab-other .text-col { color: #fff !important; }
-        .log-group.tab-custom { border-left: 4px solid var(--tab-color, #2f5d70); border-radius: 0 !important; }
-        .tab-badge { background: #2f5d70; color: #e6dd00; border-radius: 0; }
-        .log-sep, .log-sep-outer { background: #2f5d70; opacity: 0.3; }
-      `;
-    } else if (theme === 'suibokuga') {
-      themeCSS = `
-        :root { --dice-success: #4a7c4a; --dice-fail: #8b3a3a; --dice-info: #555; --accent-color: #333; --edit-btn-bg: rgba(255, 255, 255, 0.9); --edit-btn-color: #555; }
-        body { background-color: #f7f4ef; }
-        .ccfolia-log-wrapper { background: #f7f4ef; color: #1a1a1a; padding: 40px; font-family: 'Noto Serif JP', 'Yu Mincho', serif; line-height: 1.8; }
-        .tab-filter-btn { background: #e8e0d5; color: #333; border-color: #b0a898; }
-        .tab-filter-btn:hover { background: #ddd5c8; }
-        .log-group { background: #ede8e0; border: 1px solid #c8bfb0; }
-        .log-group.tab-main { background: transparent; border: none; }
-        .log-group.tab-info { margin: 3px 0; background: #e8e0d5; border-color: #8a7a6a; }
-        .bgm-summary.tab-info { background: #e8e0d5; color: #333; border-color: #8a7a6a; }
-        .log-group.tab-other { background: #ede8e0; border-color: #b0a898; }
-        .log-group.tab-other .text-col { color: #888 !important; }
-        .log-group.tab-custom { border-left: 3px solid var(--tab-color, #4a7c4a); }
-        .tab-badge { background: var(--tab-color, #555); color: #f7f4ef; }
-        .log-sep, .log-sep-outer { background: #8a7a6a; opacity: 0.35; }
-      `;
-    } else if (theme === 'terminal') {
-      themeCSS = `
-        :root { --dice-success: #00ff41; --dice-fail: #ff4444; --dice-info: #00cc33; --accent-color: #00ff41; }
-        body { background-color: #0d0d0d; }
-        .ccfolia-log-wrapper { background: #0d0d0d; color: #00ff41; padding: 40px; font-family: 'Consolas', 'Courier New', monospace; line-height: 1.6; }
-        .tab-filter-btn { background: #0a1a0a; color: #00ff41; border-color: #00aa2a; border-radius: 0; }
-        .tab-filter-btn:hover { background: #0d2a0d; }
-        .log-group { background: #0a140a; border: 1px solid #00aa2a; border-radius: 0 !important; }
-        .log-group.tab-main { background: transparent; border: none; }
-        .log-group.tab-info { margin: 3px 0; background: #0a2a0a; border-color: #00ff41; border-radius: 0 !important; }
-        .bgm-summary.tab-info { background: #0a2a0a; color: #00ff41; border-color: #00ff41; }
-        .log-group.tab-other { background: #111; border-color: #005a15; border-radius: 0 !important; }
-        .log-group.tab-other .text-col { color: #007a1f !important; }
-        .log-group.tab-custom { border-left: 2px solid var(--tab-color, #00ff41); border-radius: 0 !important; }
-        .tab-badge { background: var(--tab-color, #00aa2a); color: #0d0d0d; border-radius: 0; font-family: monospace; }
-        .name-col { color: #00cc33 !important; }
-        .log-sep, .log-sep-outer { background: #00aa2a; opacity: 0.4; }
-      `;
-    } else if (theme === 'pink') {
-      themeCSS = `
-        :root { --dice-success: #e91e8c; --dice-fail: #c2185b; --dice-info: #f06292; --accent-color: #e91e8c; }
-        body { background-color: #fff0f5; }
-        .ccfolia-log-wrapper { background: #fff0f5; color: #4a1535; padding: 40px; font-family: 'Malgun Gothic', sans-serif; line-height: 1.5; }
-        .tab-filter-btn { background: #ffd6e7; color: #880e4f; border-color: #f48fb1; }
-        .tab-filter-btn:hover { background: #ffb6c1; }
-        .log-group { background: #ffe4ec; border: 1px solid #f8bbd0; }
-        .log-group.tab-main { background: transparent; border: none; }
-        .log-group.tab-info { margin: 3px 0; background: #ffb6c1; border-color: #f48fb1; }
-        .bgm-summary.tab-info { background: #ffb6c1; color: #880e4f; border-color: #f48fb1; }
-        .log-group.tab-other { background: #ffe4ec; border-color: #f8bbd0; }
-        .log-group.tab-other .text-col { color: #c77a9a !important; }
-        .log-group.tab-custom { border-left: 2px solid var(--tab-color, #e91e8c); }
-        .tab-badge { background: var(--tab-color, #e91e8c); color: #fff; }
-        .log-sep, .log-sep-outer { background: #f48fb1; opacity: 0.6; }
-      `;
-    } else if (theme === 'pastel') {
-      themeCSS = `
-        :root { --dice-success: #6a9f6a; --dice-fail: #c97b84; --dice-info: #7a9fc9; --accent-color: #9b7ec9; }
-        body { background-color: #f9f5ff; }
-        .ccfolia-log-wrapper { background: #f9f5ff; color: #3a2d4a; padding: 40px; font-family: 'Malgun Gothic', sans-serif; line-height: 1.5; }
-        .tab-filter-btn { background: #ede0ff; color: #5a3d7a; border-color: #c9a8f0; }
-        .tab-filter-btn:hover { background: #e0ccff; }
-        .log-group { background: #f0e8ff; border: 1px solid #dcc8f5; }
-        .log-group.tab-main { background: transparent; border: none; }
-        .log-group.tab-info { margin: 3px 0; background: #e8d5fb; border-color: #c9a8f0; }
-        .bgm-summary.tab-info { background: #e8d5fb; color: #5a3d7a; border-color: #c9a8f0; }
-        .log-group.tab-other { background: #eef5ff; border-color: #c8ddf5; }
-        .log-group.tab-other .text-col { color: #8a9abf !important; }
-        .log-group.tab-custom { border-left: 2px solid var(--tab-color, #9b7ec9); }
-        .tab-badge { background: var(--tab-color, #9b7ec9); color: #fff; }
-        .log-sep, .log-sep-outer { background: #c9a8f0; opacity: 0.5; }
-      `;
-    } else {
-      themeCSS = `
-        :root { --dice-success: #4ade80; --dice-fail: #ff6b6b; --dice-info: #a8b3ff; --accent-color: #e74c3c; }
-        body { background-color: #1e1e1e; }
-        .ccfolia-log-wrapper { background: #1e1e1e; color: #eee; padding: 40px; font-family: 'Malgun Gothic', sans-serif; line-height: 1.4; }
-        .tab-filter-btn { background: #2a2a2a; color: #ccc; border-color: #555; }
-        .tab-filter-btn:hover { background: #3a3a3a; }
-        .log-group { background: #252525; }
-        .log-group.tab-main { background: transparent; }
-        .log-group.tab-info { margin: 3px 0; background: #3A3F52; }
-        .bgm-summary.tab-info { background: #3A3F52; color: #eee; border-color: rgba(255,255,255,0.15); }
-        .log-group.tab-other { background: #4a4a4a; }
-        .log-group.tab-other .text-col { color: #aaaaaa !important; }
-        .log-group.tab-custom { border-left: 2px solid var(--tab-color, #888); }
-        .tab-badge { background: rgba(0,0,0,0.5); color: #fff; }
-        .log-sep, .log-sep-outer { background: rgba(255,255,255,0.1); }
-      `;
-    }
+    let themeCSS = buildThemeCSS(theme); // reassigned below when a custom font is selected
 
     // Custom Fonts Injection
     let fontImportCSS = '';
@@ -2195,13 +2250,21 @@
     if (!fontImportCSS) return '';
     if (fontImportCSS.startsWith('@font-face')) return `<style>${fontImportCSS}</style>`;
     const m = fontImportCSS.match(/url\(['"]?([^'")\s]+)['"]?\)/);
-    return m ? `<link rel="stylesheet" href="${m[1]}">` : '';
+    return m ? `<link rel="stylesheet" href="${escapeAttr(m[1])}">` : '';
   })()}
   <style>
-    ${baseCSS}
-    ${themeCSS}
+    ${minifyCSS(baseCSS + editCSS + themeCSS)}
+    ${minifyCSS(`
+    .log-entry.dice-info .text-col { color: var(--dice-info); }
     .log-entry.dice-success .text-col, .log-group .log-entry.dice-success .text-col { color: var(--dice-success) !important; }
     .log-entry.dice-fail .text-col, .log-group .log-entry.dice-fail .text-col { color: var(--dice-fail) !important; }
+    .d { color: var(--dice-info); font-weight: bold; }
+    .log-entry.m { margin-top: 7px; }
+    .avatar-img.avp { background: #444; }
+    .avatar-img.avh { visibility: hidden; }
+    .bgm-arrow { font-size: 12px; opacity: 0.7; }
+    `)}
+    @@NC@@
     ${fontFamilyOverride}
   </style>
 </head>
@@ -2233,6 +2296,18 @@
       }
     });
 
+    const logIndexMap = new Map();
+    parsedLogs.forEach((l, i) => logIndexMap.set(l, i));
+    const narratorSet = new Set(narrators);
+    // Each distinct speaker colour is declared once as a class instead of repeating an inline style on every line.
+    const nameColorClasses = new Map();
+    const nameColorClass = (c) => {
+      if (c === 'inherit') return '';
+      let k = nameColorClasses.get(c);
+      if (!k) { k = 'nc' + nameColorClasses.size; nameColorClasses.set(c, k); }
+      return k;
+    };
+
     function renderGroup(tab, logs) {
       if (logs.length === 0) return '';
       const t = (tab || 'main').toLowerCase();
@@ -2257,7 +2332,7 @@
       
       logs.forEach((log) => {
         // Find matching parsedLogs global index to link back edits
-        const globalIdx = parsedLogs.indexOf(log);
+        const globalIdx = logIndexMap.get(log);
         
         const isSystemEntry = (log.name?.toLowerCase() === 'system');
         
@@ -2265,6 +2340,7 @@
         const charOverride = charSettings[log.name] || {};
         let nameColor = charOverride.color || log.color || 'inherit';
         if (nameColor !== 'inherit') nameColor = colorToHex(nameColor);
+        if (nameColor !== 'inherit' && !/^#[0-9a-f]{3,8}$/.test(nameColor)) nameColor = '#ffffff';
         
         // Match cocoroke: Each chat message uses its own iconUrl (per-chat expression/standing)
         let avatarUrl = log.iconUrl || null;
@@ -2276,7 +2352,7 @@
 
         // Check if this speaker should be formatted as a Narrator (only in the Main tab)
         const isMainTab = tab === '메인' || (tab && tab.toLowerCase() === 'main');
-        const isNarrator = isMainTab && narrators.includes(log.name);
+        const isNarrator = isMainTab && narratorSet.has(log.name);
 
         // Merge only if both speaker name AND avatar image are identical
         let isMerged = !isNarrator && (log.name === prevName && avatarUrl === prevAvatar);
@@ -2288,20 +2364,15 @@
           if (c === '#fff' || c === '#ffffff' || c === '#e0e0e0' || c === '#eee' || c === '#eeeeee' || c === 'white' || c === 'rgb(255,255,255)') nameColor = '#2c3e50';
         }
         
-        let textColor = 'inherit';
-        if (log.hasDice && log.isSuccess) textColor = 'var(--dice-success)';
-        else if (log.hasDice && log.isFailure) textColor = 'var(--dice-fail)';
-        else if (log.hasDice) textColor = 'var(--dice-info)';
-        
         let displayText;
         if (log._isBGM) {
-          displayText = `<a class="bgm-inline-link" href="${escapeHtml(log._bgmUrl)}" target="_blank" rel="noopener noreferrer">🎵 ${escapeHtml(log._bgmLabel)}</a>`;
+          displayText = `<a class="bgm-inline-link" href="${escapeAttr(log._bgmUrl)}" target="_blank" rel="noopener noreferrer">🎵 ${escapeHtml(log._bgmLabel)}</a>`;
         } else {
           displayText = escapeHtml(log.text);
           if (!log.isSuccess && !log.isFailure) {
-            displayText = displayText.replace(/(\d+[dD]\d+)/g, '<span style="color:var(--dice-info); font-weight:bold;">$1</span>');
-            displayText = displayText.replace(/→\s*(\d+)/g, '→ <span style="color:var(--dice-info); font-weight:bold;">$1</span>');
-            displayText = displayText.replace(/\[(\d+(?:,\s*\d+)*)\]/g, '<span style="color:var(--dice-info); font-weight:bold;">[$1]</span>');
+            displayText = displayText.replace(/(\d+[dD]\d+)/g, '<span class="d">$1</span>');
+            displayText = displayText.replace(/→\s*(\d+)/g, '→ <span class="d">$1</span>');
+            displayText = displayText.replace(/\[(\d+(?:,\s*\d+)*)\]/g, '<span class="d">[$1]</span>');
           }
         }
         
@@ -2310,40 +2381,24 @@
         const isSystemTab = (log.name?.toLowerCase() === 'system');
         
         if (showIcons && !isInfoTab && !isNarrator) {
-          if (isSystemTab) avatarHtml = `<div class="avatar-img" style="visibility:hidden;"></div>`;
-          else if (!isMerged && avatarUrl) avatarHtml = `<img src="${escapeHtml(avatarUrl)}" class="avatar-img">`;
-          else if (!isMerged && !avatarUrl) avatarHtml = `<div class="avatar-img" style="background:#444;"></div>`;
-          else avatarHtml = `<div style="width:24px; height:24px; flex-shrink:0;"></div>`;
+          if (isSystemTab) avatarHtml = `<div class="avatar-img avh"></div>`;
+          else if (!isMerged && avatarUrl) avatarHtml = `<img src="${escapeAttr(avatarUrl)}" class="avatar-img" decoding="async">`;
+          else if (!isMerged && !avatarUrl) avatarHtml = `<div class="avatar-img avp"></div>`;
+          else avatarHtml = `<div class="avs"></div>`;
         }
         
         let nameHtml = "";
         if (!isNarrator) {
-          nameHtml = isMerged ? `<div class="name-col"></div>` : `<div class="name-col" style="color:${nameColor}">${avatarHtml}<span${isEditing ? ' contenteditable="true"' : ''}>${escapeHtml(log.name)}</span></div>`;
+          const ncls = nameColorClass(nameColor);
+          nameHtml = isMerged ? `<div class="name-col"></div>` : `<div class="name-col${ncls ? ' ' + ncls : ''}">${avatarHtml}<span${isEditing ? ' contenteditable="true"' : ''}>${escapeHtml(log.name)}</span></div>`;
         }
         
-        let entryClass = `log-entry${log.hasDice && log.isSuccess ? ' dice-success' : log.hasDice && log.isFailure ? ' dice-fail' : ''}`;
-        if (isNarrator) {
-          entryClass += ' narration-entry';
-        }
+        let entryClass = 'log-entry';
+        if (log.hasDice) entryClass += log.isSuccess ? ' dice-success' : log.isFailure ? ' dice-fail' : ' dice-info';
+        if (isNarrator) entryClass += ' narration-entry';
+        else if (isMerged && !showIcons) entryClass += ' m';
         
-        let entryStyle = isMerged && !isNarrator ? (showIcons ? `` : `margin-top: 7px;`) : ``;
-        const textColStyle = (log.hasDice && (log.isSuccess || log.isFailure))
-          ? `style="color:${textColor} !important"`
-          : `style="color:${textColor}"`;
-          
-        let editControlsHtml = '';
-        if (isEditing) {
-          editControlsHtml = `
-            <div class="edit-controls-wrapper">
-              <button class="edit-ctrl-btn btn-move-up" data-idx="${globalIdx}" title="위로 이동">▲</button>
-              <button class="edit-ctrl-btn btn-move-down" data-idx="${globalIdx}" title="아래로 이동">▼</button>
-              <button class="edit-ctrl-btn btn-edit-text" data-idx="${globalIdx}" title="메시지 수정">✎</button>
-              <button class="edit-ctrl-btn btn-add-after" data-idx="${globalIdx}" title="이 아래에 새 채팅 추가">＋</button>
-              <button class="edit-ctrl-btn btn-delete" data-idx="${globalIdx}" title="이 채팅 삭제">✕</button>
-            </div>
-          `;
-        }
-        res.push(`<div class="${entryClass}" style="${entryStyle}" data-idx="${globalIdx}">${nameHtml}<div class="text-col" ${textColStyle}${isEditing ? ' contenteditable="true"' : ''}>${displayText}</div>${editControlsHtml}</div>`);
+        res.push(`<div class="${entryClass}"${withIdx ? ` data-idx="${globalIdx}"` : ''}>${nameHtml}<div class="text-col"${isEditing ? ' contenteditable="true"' : ''}>${displayText}</div></div>`);
         
         // Prev name and avatar are tracked for merge
         prevName = isNarrator ? null : log.name;
@@ -2405,13 +2460,21 @@
         return true;
       });
       let bgmItemsHtml = dedupedBgmList.map((b, i) =>
-        `<li><a class="bgm-list-link" href="${escapeHtml(b.url)}" target="_blank" rel="noopener noreferrer">${i + 1}. ${escapeHtml(b.label)}</a></li>`
+        `<li><a class="bgm-list-link" href="${escapeAttr(b.url)}" target="_blank" rel="noopener noreferrer">${i + 1}. ${escapeHtml(b.label)}</a></li>`
       ).join('');
-      const bgmBlock = `<div class="bgm-container"><details class="bgm-summary tab-info"><summary class="bgm-summary-title"><span>🎵 이번 세션 BGM (${dedupedBgmList.length})</span><span style="font-size:12px; opacity:0.7;">▼</span></summary><ul class="bgm-list">${bgmItemsHtml}</ul></details></div>`;
-      html = html.replace('<div class="ccfolia-log-wrapper"><div class="log-container">', `<div class="ccfolia-log-wrapper"><div class="log-container">${bgmBlock}`);
+      const bgmBlock = `<div class="bgm-container"><details class="bgm-summary tab-info"><summary class="bgm-summary-title"><span>🎵 이번 세션 BGM (${dedupedBgmList.length})</span><span class="bgm-arrow">▼</span></summary><ul class="bgm-list">${bgmItemsHtml}</ul></details></div>`;
+      // function replacer: BGM labels may contain "$&" / "$1" which a plain replacement string would interpret
+      html = html.replace('<div class="ccfolia-log-wrapper"><div class="log-container">', () => `<div class="ccfolia-log-wrapper"><div class="log-container">${bgmBlock}`);
     }
 
+    // One shared toolbar for the whole editing preview; the preview script moves it into the hovered entry.
+    if (isEditing) {
+      html += `<div class="edit-controls-wrapper" id="edit-toolbar"><button class="edit-ctrl-btn btn-move-up" title="위로 이동">▲</button><button class="edit-ctrl-btn btn-move-down" title="아래로 이동">▼</button><button class="edit-ctrl-btn btn-edit-text" title="메시지 수정">✎</button><button class="edit-ctrl-btn btn-add-after" title="이 아래에 새 채팅 추가">＋</button><button class="edit-ctrl-btn btn-delete" title="이 채팅 삭제">✕</button></div>`;
+    }
     html += `</div></div></body></html>`;
+    let ncRules = '.avs{width:24px;height:24px;flex-shrink:0}';
+    nameColorClasses.forEach((cls, color) => { ncRules += `.${cls}{color:${color}}`; });
+    html = html.replace('@@NC@@', () => ncRules);
     return html;
   }
 
