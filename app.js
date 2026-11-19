@@ -841,10 +841,14 @@
     
     if (!state.uniqueCharacters || state.uniqueCharacters.length === 0) return;
 
+    // Original color of each character = color of its first log entry (one pass over the log)
+    const firstColorByName = new Map();
+    for (const log of state.parsedLogs) {
+      if (!firstColorByName.has(log.name)) firstColorByName.set(log.name, log.color);
+    }
+
     state.uniqueCharacters.forEach(name => {
-      // Find the original color of this character from the parsed log
-      const firstEntry = state.parsedLogs.find(log => log.name === name);
-      const originalColor = firstEntry ? firstEntry.color : '#ffffff';
+      const originalColor = firstColorByName.has(name) ? firstColorByName.get(name) : '#ffffff';
       
       const settings = state.charSettings[name] || {};
       const savedColor = colorToHex(settings.color || originalColor);
@@ -868,7 +872,9 @@
       const avatarInput = item.querySelector('.char-avatar-input');
       const resetBtn = item.querySelector('.char-reset-btn');
 
+      let avatarTypingTimer = null;
       const updateSettings = () => {
+        clearTimeout(avatarTypingTimer);
         let avatarVal = avatarInput.value.trim();
         state.charSettings[name] = {
           color: colorPicker.value,
@@ -881,9 +887,14 @@
 
       colorPicker.addEventListener('change', updateSettings);
       avatarInput.addEventListener('change', updateSettings);
-      avatarInput.addEventListener('input', updateSettings);
+      // Typing a URL re-rendered the whole preview on every keystroke; wait until typing pauses
+      avatarInput.addEventListener('input', () => {
+        clearTimeout(avatarTypingTimer);
+        avatarTypingTimer = setTimeout(updateSettings, 400);
+      });
 
       resetBtn.addEventListener('click', () => {
+        clearTimeout(avatarTypingTimer);
         delete state.charSettings[name];
         saveSettings();
         colorPicker.value = colorToHex(originalColor);
@@ -1040,14 +1051,14 @@
     });
     state.uniqueTabs = Array.from(tabSet);
 
-    // Extract Unique characters
-    const charSet = new Set();
+    // Extract Unique characters (and each one's first logged color, in the same pass)
+    const firstColorByName = new Map();
     state.parsedLogs.forEach(log => {
-      if (log.name && log.name.toLowerCase() !== 'system') {
-        charSet.add(log.name);
+      if (log.name && log.name.toLowerCase() !== 'system' && !firstColorByName.has(log.name)) {
+        firstColorByName.set(log.name, log.color);
       }
     });
-    state.uniqueCharacters = Array.from(charSet);
+    state.uniqueCharacters = Array.from(firstColorByName.keys());
 
     // Auto-populate parsed colors to state.charSettings if not already defined (matches cocoroke)
     state.uniqueCharacters.forEach(name => {
@@ -1065,9 +1076,9 @@
         if (charactersMap && charactersMap[name] && charactersMap[name].color) {
           state.charSettings[name].color = colorToHex(charactersMap[name].color);
         } else {
-          const firstEntry = state.parsedLogs.find(log => log.name === name);
-          if (firstEntry && firstEntry.color) {
-            const parsedHex = colorToHex(firstEntry.color);
+          const firstColor = firstColorByName.get(name);
+          if (firstColor) {
+            const parsedHex = colorToHex(firstColor);
             if (parsedHex && parsedHex.toLowerCase() !== '#ffffff') {
               state.charSettings[name].color = parsedHex;
             }
@@ -1174,12 +1185,55 @@
       })
       .catch(e => console.warn('Room info API fetch note:', e));
 
-    // Paginated fetch of messages
-    let allMessages = [];
+    // Fetch messages. Only the fields the log needs are requested to cut payload size.
+    const DOCS_BASE = `https://firestore.googleapis.com/v1/projects/ccfolia-160aa/databases/(default)/documents/rooms/${roomId}`;
+    const MSG_FIELDS = ['name', 'text', 'color', 'iconUrl', 'avatarUrl', 'createdAt', 'channelName', 'tab', 'extend'];
+    const allMessages = [];
+    const reportProgress = () => {
+      const loadedLabel = allMessages.length.toLocaleString();
+      showToast(`메시지 로딩 중... (${loadedLabel}개)`);
+      updateStatus(`로딩 중 (${loadedLabel}개)`, 'editing');
+    };
+
+    // Fast path: runQuery returns up to 5000 docs per request (list API caps at 300 per page).
+    let usedRunQuery = false;
+    try {
+      const QUERY_BATCH = 5000;
+      let lastName = null;
+      while (true) {
+        const structuredQuery = {
+          from: [{ collectionId: 'messages' }],
+          select: { fields: MSG_FIELDS.map(f => ({ fieldPath: f })) },
+          orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+          limit: QUERY_BATCH
+        };
+        if (lastName) structuredQuery.startAt = { values: [{ referenceValue: lastName }], before: false };
+        const res = await fetch(`${DOCS_BASE}:runQuery`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ structuredQuery })
+        });
+        if (!res.ok) throw new Error('runQuery HTTP ' + res.status);
+        const rows = await res.json();
+        let count = 0;
+        for (const row of rows) {
+          if (row.document) { allMessages.push(row.document); lastName = row.document.name; count++; }
+        }
+        if (count > 0) reportProgress();
+        if (count < QUERY_BATCH) break;
+      }
+      usedRunQuery = true;
+    } catch (e) {
+      console.warn('runQuery failed, falling back to paginated list:', e);
+      allMessages.length = 0;
+    }
+
+    // Fallback: paginated list API (with field mask). Also produces the auth / not-found errors.
     let pageToken = '';
-    
-    while (true) {
-      const apiUrl = `https://firestore.googleapis.com/v1/projects/ccfolia-160aa/databases/(default)/documents/rooms/${roomId}/messages?pageSize=300${pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : ''}`;
+    const maskQuery = MSG_FIELDS.map(f => 'mask.fieldPaths=' + f).join('&');
+
+    while (!usedRunQuery) {
+      const apiUrl = `${DOCS_BASE}/messages?pageSize=300&${maskQuery}${pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : ''}`;
       const res = await fetch(apiUrl, { headers });
       
       if (!res.ok) {
@@ -1192,9 +1246,7 @@
       const data = await res.json();
       if (data.documents && data.documents.length > 0) {
         for (const d of data.documents) allMessages.push(d);
-        const loadedLabel = allMessages.length.toLocaleString();
-        showToast(`메시지 로딩 중... (${loadedLabel}개)`);
-        updateStatus(`로딩 중 (${loadedLabel}개)`, 'editing');
+        reportProgress();
       }
       
       if (data.nextPageToken) {
@@ -1253,7 +1305,10 @@
       };
     }).filter(log => log.text && log.text.trim() !== '');
 
-    logs.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    // Parse each timestamp once instead of twice per comparison
+    const ts = new Map();
+    for (const l of logs) ts.set(l, Date.parse(l.createdAt) || 0);
+    logs.sort((a, b) => ts.get(a) - ts.get(b));
 
     return { logs, roomTitle, charactersMap };
   }
@@ -1285,6 +1340,11 @@
       let logs = [];
       
       if (dls.length > 0) {
+        // Tab labels are looked up once, not once per message
+        const headerTabs = Array.from(doc.querySelectorAll('header label'))
+          .map(lbl => ({ id: lbl.querySelector('input')?.id, name: lbl.textContent.trim() }))
+          .filter(h => h.id);
+
         // Log Format type 1 (definition list based)
         logs = Array.from(dls).map(dl => {
           let rawClass = dl.className || '';
@@ -1295,11 +1355,7 @@
           else if (rawClass.includes('tab_1') || rawClass.includes('secret')) tab = 'secret';
           else tab = 'custom';
 
-          const headerLabels = doc.querySelectorAll('header label');
-          headerLabels.forEach(lbl => {
-            const input = lbl.querySelector('input');
-            if (input && rawClass.includes(input.id)) tab = lbl.textContent.trim();
-          });
+          for (const h of headerTabs) if (rawClass.includes(h.id)) tab = h.name;
 
           tab = normalizeTabName(tab);
 
@@ -1662,22 +1718,23 @@
       styleEl.remove();
     }
 
-    const entries = doc.querySelectorAll('.log-entry');
-    entries.forEach(entry => {
-      if (enabled) {
-        entry.onclick = () => {
+    // One delegated click handler instead of one handler per log entry
+    const container = doc.querySelector('.log-container');
+    if (enabled) {
+      if (container) {
+        container.onclick = (e) => {
+          const entry = e.target.closest && e.target.closest('.log-entry');
+          if (!entry) return;
           const idx = parseInt(entry.dataset.idx);
           if (isNaN(idx)) return;
           handleEntryClickForRange(idx);
         };
-      } else {
-        entry.onclick = null;
-        entry.classList.remove('range-dimmed', 'range-selected-in', 'range-selected-start', 'range-selected-end');
       }
-    });
-
-    if (enabled) {
       updateRangeSelectionUI();
+    } else {
+      doc.querySelectorAll('.range-dimmed, .range-selected-in, .range-selected-start, .range-selected-end').forEach(entry => {
+        entry.classList.remove('range-dimmed', 'range-selected-in', 'range-selected-start', 'range-selected-end');
+      });
     }
   }
 
